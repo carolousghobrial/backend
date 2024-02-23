@@ -10,99 +10,75 @@ app.get("/", (req, res) => {
 });
 
 app.post("/addAnnouncment", async (req, res) => {
+  Announcment = {
+    english_title: req.body.english_title,
+    english_description: req.body.english_description,
+    arabic_title: req.body.arabic_title,
+    arabic_description: req.body.arabic_description,
+    url: req.body.url,
+    valid: req.body.valid,
+  };
+  const Image = req.body.image_url;
+  console.log(Image);
+
   try {
-    // Extract announcement data from request body
-    const announcement = {
-      english_title: req.body.english_title,
-      english_description: req.body.english_description,
-      arabic_title: req.body.arabic_title,
-      arabic_description: req.body.arabic_description,
-      url: req.body.url,
-      valid: req.body.valid,
-    };
-
-    // Extract image from request body
-    const image = req.body.image_url;
-
-    // Insert announcement into Supabase
-    const { data: announcementData, error: announcementError } = await supabase
-      .from("announcements")
-      .insert([announcement])
+    const { data, error } = await supabase.supabase
+      .from("announcments")
+      .insert([Announcment])
       .select()
       .single();
+    //console.log(data);
+    const myId = data.id;
 
-    if (announcementError) {
-      throw new Error(
-        "Error inserting announcement into database: " +
-          announcementError.message
-      );
-    }
-
-    const announcementId = announcementData.id;
-
-    // Upload image to Supabase Storage
-    const { data: fileData, error: uploadError } = await supabase.storage
-      .from("announcements")
-      .upload(announcementId, decode(image), {
-        contentType: "image/png", // Assuming the image type is PNG
-      });
+    // Upload file to Superbase Storage
+    const { data: fileData, error: uploadError } =
+      await supabase.supabase.storage
+        .from("announcments")
+        .upload(myId, decode(Image), {
+          contentType: "image/png",
+        });
 
     if (uploadError) {
-      throw new Error(
-        "Error uploading image to storage: " + uploadError.message
-      );
+      console.error("Error uploading file:", uploadError.message);
+      return;
     }
 
-    // Get public URL of the uploaded image
-    const fileURLResponse = await supabase.storage
-      .from("announcements")
-      .getPublicUrl(announcementId);
+    // // // Get the URL of the uploaded file
+    const fileURL = supabase.supabase.storage
+      .from("announcments")
+      .getPublicUrl(myId);
+    const newAnnouncement = Announcment;
 
-    if (fileURLResponse.error) {
-      throw new Error(
-        "Error getting public URL of the uploaded image: " +
-          fileURLResponse.error.message
-      );
-    }
-
-    const fileURL = fileURLResponse.data.publicUrl;
-
-    // Update announcement with image URL
-    const { data: updatedData, error: updateError } = await supabase
-      .from("announcements")
-      .update({ image_url: fileURL })
-      .eq("id", announcementId)
+    const newFileURL = fileURL.data.publicUrl;
+    //console.log(newFileURL);
+    newAnnouncement.image_url = newFileURL;
+    // console.log(newAnnouncement);
+    // // Save file URL to database
+    const { data: updatedData, error: updatedError } = await supabase.supabase
+      .from("announcments")
+      .update({ image_url: newFileURL })
+      .eq("id", myId)
       .select()
       .single();
 
-    if (updateError) {
-      throw new Error(
-        "Error updating announcement with image URL: " + updateError.message
+    if (updatedError) {
+      console.error("Error saving file URL to database:", updatedError.message);
+      return;
+    } else {
+      const requestBody = {
+        title: updatedData.english_title,
+        body: updatedData.english_description,
+      };
+
+      // Call another endpoint (API) with a request body using Axios
+      const response = await axios.post(
+        "http://localhost:3000/notifications/sendPushNotification",
+        requestBody
       );
+      res.send({ ok: true });
     }
-
-    // Send push notification
-    const notificationData = {
-      title: updatedData.english_title,
-      body: updatedData.english_description,
-    };
-
-    const notificationResponse = await axios.post(
-      "http://localhost:3000/notifications/sendPushNotification",
-      notificationData
-    );
-
-    if (notificationResponse.error) {
-      throw new Error(
-        "Error sending push notification: " + notificationResponse.error.message
-      );
-    }
-
-    // Return success response
-    res.send({ ok: true });
   } catch (error) {
     console.error("Error:", error.message);
-    res.status(500).send({ error: error.message });
   }
 });
 
@@ -175,30 +151,27 @@ app.get("/getValidAnnouncments", async (req, res) => {
 //     });
 // });
 
-// app.delete("/deleteAnnouncment/:id", (req, res) => {
-//   const id = req.params.id;
+app.delete("/deleteAnnouncment/:index", async (req, res) => {
+  const id = req.params.index;
 
-//   firebase.db
-//     .collection("main-announcments")
-//     .doc(id)
-//     .delete()
-//     .then((snapshot) => {
-//       const path = `mainAnnouncments/${id}/image`;
-//       const storageRef = ref(firebase.storage, path);
-//       deleteObject(storageRef)
-//         .then(() => {
-//           // File deleted successfully
-//           redisClient.del("main-announcments");
-//           redisClient.del("valid-main-announcments");
-
-//           res.send(snapshot);
-//         })
-//         .catch((error) => {
-//           // Uh-oh, an error occurred!
-//         });
-//       //updateRedis()
-//     });
-// });
+  const { data: updatedData, error: updateError } = await supabase.supabase
+    .from("announcments")
+    .delete()
+    .match({ id: id });
+  if (updateError) {
+    res.status(500).send(updateError.message);
+  } else {
+    const { data, error } = await supabase.supabase.storage
+      .from("announcments")
+      .remove(id);
+    if (error) {
+      console.log(error);
+      res.status(500);
+    } else {
+      res.send(data);
+    }
+  }
+});
 
 // function updateRedis(newitem) {
 //   redisClient.del("main-announcments");

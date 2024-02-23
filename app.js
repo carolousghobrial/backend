@@ -7,6 +7,8 @@ const calendar = require("./routes/calendar");
 const prayerRequests = require("./routes/prayerRequests");
 const notifications = require("./routes/notifications");
 const services = require("./routes/services");
+const visitations = require("./routes/visitations");
+const confessions = require("./routes/confessions");
 var bodyParser = require("body-parser");
 
 // Increase payload size limit (e.g., 10MB)
@@ -28,6 +30,8 @@ app.use("/calendar", calendar);
 app.use("/prayers", prayerRequests);
 app.use("/notifications", notifications);
 app.use("/services", services);
+app.use("/visitations", visitations);
+app.use("/confessions", confessions);
 
 app.get("/", (req, res) => {
   res.send("Hello, Express!");

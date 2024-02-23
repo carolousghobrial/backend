@@ -59,7 +59,9 @@ function generateTimeSlots(date, startTime, endTime, slotDuration) {
       date: currentTime.format("YYYY-MM-DD"),
       day_of_week: dayNames[currentTime.day()],
       start_time: currentTime.format("HH:mm"),
-      end_time: currentTime.add(slotDuration, "minutes").format("HH:mm"),
+      end_time: currentTime
+        .add(slotDuration, "minutes")
+        .format("YYYY-MM-DD HH:mm"),
       available: true,
     });
   }
@@ -71,10 +73,10 @@ app.post("/addAvailableSlots", async (req, res) => {
   // Example usage
   const startDate = "2024-03-01";
   const endDate = "2024-04-27";
-  const targetDays = [5]; // Sundays and Thursdays
-  const startTime = "10:30"; // Start time for slots
-  const endTime = "21:30"; // End time for slots
-  const slotDuration = 15; // Slot duration in minutes
+  const targetDays = [0, 3, 4]; // Sundays and Thursdays
+  const startTime = "18:00"; // Start time for slots
+  const endTime = "21:00"; // End time for slots
+  const slotDuration = 60; // Slot duration in minutes
 
   const availableSlots = generateAvailableSlots(
     startDate,
@@ -84,9 +86,9 @@ app.post("/addAvailableSlots", async (req, res) => {
     endTime,
     slotDuration
   );
-  //res.send(availableSlots);
+  console.log(availableSlots);
   const { data, error } = await supabase.supabase
-    .from("confession_slots")
+    .from("visitation_slots")
     .insert(availableSlots);
   if (error) {
     res.status(500).send(error.message);
@@ -97,18 +99,19 @@ app.post("/addAvailableSlots", async (req, res) => {
 
 app.get("/getAvailableSlots", async (req, res) => {
   const { data, error } = await supabase.supabase
-    .from("confession_slots")
+    .from("visitation_slots")
     .select("*")
     .eq("available", true);
+  console.log(data);
   if (error) {
     res.status(500).send(error.message);
   } else {
     res.send(data);
   }
 });
-app.get("/getConfirmedConfessionRequest", async (req, res) => {
+app.get("/getConfirmedVisitationRequest", async (req, res) => {
   const { data, error } = await supabase.supabase
-    .from("confession_reservation")
+    .from("visitation_reservation")
     .select("*")
     .eq("confirmed", true);
   console.log(error);
@@ -118,9 +121,9 @@ app.get("/getConfirmedConfessionRequest", async (req, res) => {
     res.send(data);
   }
 });
-app.get("/getUnconfirmedConfessionRequest", async (req, res) => {
+app.get("/getUnconfirmedVisitationRequest", async (req, res) => {
   const { data, error } = await supabase.supabase
-    .from("confession_reservation")
+    .from("visitation_reservation")
     .select("*")
     .eq("confirmed", false);
 
@@ -130,43 +133,41 @@ app.get("/getUnconfirmedConfessionRequest", async (req, res) => {
     res.send(data);
   }
 });
-app.post("/requestConfession", async (req, res) => {
-  const confessionRequest = {
+app.post("/requestVisitation", async (req, res) => {
+  const visitationRequest = {
     user_id: req.body.user_id,
     slot_id: req.body.slot_id,
+    reason: req.body.reason,
+    address: req.body.address,
   };
-  console.log(confessionRequest);
   const { data, error } = await supabase.supabase
-    .from("confession_reservation")
-    .insert([confessionRequest]);
+    .from("visitation_reservation")
+    .insert([visitationRequest]);
   console.log(error);
   if (error) {
-    console.log(error);
-
     res.status(500).send(error.message);
   } else {
     const { data: updatedData, error: updateError } = await supabase.supabase
-      .from("confession_slots")
+      .from("visitation_slots")
       .update({ available: false })
       .eq("id", req.body.slot_id)
       .select();
-    if (updateError) {
+    if (error) {
       res.status(500).send(error.message);
     } else {
       res.send(updatedData);
     }
   }
 });
-app.post("/confirmtConfession/:reservationId", async (req, res) => {
+app.post("/confirmtVisitation/:reservationId", async (req, res) => {
   const reservationId = req.params.reservationId;
   const { data: data, error: error } = await supabase.supabase
-    .from("confession_reservation")
+    .from("visitation_reservation")
     .update({ confirmed: true })
     .eq("id", reservationId)
     .select();
-
+  console.log(error);
   if (error) {
-    console.log("HEREE");
     res.status(500).send(error.message);
   } else {
     res.send(data);
