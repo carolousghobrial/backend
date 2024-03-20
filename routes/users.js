@@ -33,7 +33,6 @@ app.post("/login", async (req, res) => {
       .select("*")
       .eq("id", data.user.id)
       .single();
-    console.log(profiles);
 
     res.send({
       token: data.session.access_token,
@@ -51,6 +50,7 @@ app.post("/register", async (req, res) => {
     portal_id: req.body.portal_id,
     password: req.body.password,
     family_id: req.body.family_id,
+    family_role: req.body.family_role,
   };
   const { data, error } = await supabase.supabase.auth.signUp({
     email: newUser.email,
@@ -64,6 +64,7 @@ app.post("/register", async (req, res) => {
         email: newUser.email,
         portal_id: newUser.portal_id,
         family_id: newUser.family_id,
+        family_role: newUser.family_role,
       },
     },
   });
@@ -74,28 +75,76 @@ app.post("/register", async (req, res) => {
     res.send(data);
   }
 });
-
+app.post("/registerwithoutemail", async (req, res) => {
+  newUser = {
+    first_name: req.body.first_name,
+    last_name: req.body.last_name,
+    dob: new Date(req.body.dob),
+    cellphone: req.body.cellphone,
+    email: req.body.email,
+    portal_id: req.body.portal_id,
+    family_id: req.body.family_id,
+    family_role: req.body.family_role,
+  };
+  const { data, error } = await supabase.supabase
+    .from("profiles")
+    .insert([newUser]);
+  if (error) {
+    console.log(error);
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
+app.post("/updateUser/:portal_id", async (req, res) => {
+  const portal_id = req.params.portal_id;
+  newUser = {
+    first_name: req.body.first_name,
+    last_name: req.body.last_name,
+    dob: new Date(req.body.dob),
+    cellphone: req.body.cellphone,
+    email: req.body.email,
+    portal_id: req.body.portal_id,
+    family_id: req.body.family_id,
+    family_role: req.body.family_role,
+  };
+  console.log(newUser);
+  const { data: updatedData, error: updateError } = await supabase.supabase
+    .from("profiles")
+    .update({ family_role: newUser.family_role.toUpperCase() })
+    .eq("portal_id", portal_id);
+  if (updateError) {
+    console.log(updateError);
+    res.status(500).send(updateError.message);
+  } else {
+    res.send(updatedData);
+  }
+});
 app.post("/forgotPassword", (req, res) => {
   const email = req.body.email;
 });
 
 app.get("/getCurrentUser/:uid", async (req, res) => {
   const jwt = req.params.uid;
-
-  const {
-    data: { user },
-  } = await supabase.supabase.auth.getUser(jwt);
-  if (user == null) {
-    res.send(null);
+  try {
+    const {
+      data: { user },
+    } = await supabase.supabase.auth.getUser(jwt);
+    if (user == null) {
+      res.status(500);
+    } else {
+      res.send(user.user_metadata);
+    }
+  } catch (error) {
+    console.log(error);
+    res.status(500);
   }
-  res.send(user.user_metadata);
 });
 app.get("/getLoggedIn", async (req, res) => {
   const {
     data: { session },
   } = await supabase.supabase.auth.getSession();
 
-  console.log(session);
   res.send(session);
 });
 app.get("/getUserById/:id", async (req, res) => {
@@ -105,7 +154,6 @@ app.get("/getUserById/:id", async (req, res) => {
     .select("*")
     .eq("id", id)
     .single();
-  console.log(profiles);
 
   if (error) {
     res.status(500).send(error.message);
@@ -115,7 +163,6 @@ app.get("/getUserById/:id", async (req, res) => {
 });
 app.get("/getFamilyUsersForHead/:familyId", async (req, res) => {
   const family_id = req.params.familyId;
-  console.log(family_id);
   const { data: profiles, error } = await supabase.supabase
     .from("profiles")
     .select("*")
@@ -127,34 +174,30 @@ app.get("/getFamilyUsersForHead/:familyId", async (req, res) => {
     res.send(profiles);
   }
 });
+app.get("/getRolesAndServiceOfUser/:userId", async (req, res) => {
+  const userId = req.params.userId;
+
+  let { data: user_service_roles, error } = await supabase.supabase
+    .from("user_service_roles")
+    .select("role_id,service_id")
+    .eq("user_id", userId);
+
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(user_service_roles);
+  }
+});
 
 app.get("/getUsers", async (req, res) => {
   const { data, error } = await supabase.supabase.from("profiles").select("*");
-  console.log(error);
-  console.log(data);
+
   if (error) {
     res.status(500).send(error.message);
   } else {
     res.send(data);
   }
 });
-// app.get("/getUsersByService/:service", checkCache, async (req, res) => {
-//   this.service = req.params.service;
-//   let users = [];
-//   const usersRef = firebase.db.collection("users");
-//   const snapshot = await usersRef
-//     .where("servicesInID", "array-contains", service)
-//     .get();
-//   if (snapshot.empty) {
-//     return;
-//   }
-//   snapshot.forEach((doc) => {
-//     users.push(doc.data());
-//   });
-//   await redisClient.set(`users-${service}`, JSON.stringify(users), {
-//     EX: 60 * 60 * 4,
-//     NX: true,
-//   });
 
 //   res.send(users);
 // });

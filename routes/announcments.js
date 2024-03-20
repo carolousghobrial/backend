@@ -10,75 +10,166 @@ app.get("/", (req, res) => {
 });
 
 app.post("/addAnnouncment", async (req, res) => {
-  Announcment = {
-    english_title: req.body.english_title,
-    english_description: req.body.english_description,
-    arabic_title: req.body.arabic_title,
-    arabic_description: req.body.arabic_description,
-    url: req.body.url,
-    valid: req.body.valid,
-  };
-  const Image = req.body.image_url;
-  console.log(Image);
-
   try {
+    // Extract announcement data from request body
+    const {
+      english_title,
+      english_description,
+      arabic_title,
+      arabic_description,
+      url,
+      valid,
+      image_url,
+    } = req.body;
+
+    // Insert announcement into database
     const { data, error } = await supabase.supabase
       .from("announcments")
-      .insert([Announcment])
+      .insert([
+        {
+          english_title,
+          english_description,
+          arabic_title,
+          arabic_description,
+          url,
+          valid,
+        },
+      ])
       .select()
       .single();
-    //console.log(data);
-    const myId = data.id;
 
-    // Upload file to Superbase Storage
+    if (error) {
+      throw new Error("Error inserting announcement into database");
+    }
+
+    // Upload image to Superbase Storage
     const { data: fileData, error: uploadError } =
       await supabase.supabase.storage
         .from("announcments")
-        .upload(myId, decode(Image), {
-          contentType: "image/png",
-        });
+        .upload(data.id, decode(image_url), { contentType: "image/png" });
 
     if (uploadError) {
-      console.error("Error uploading file:", uploadError.message);
-      return;
+      throw new Error("Error uploading image to storage");
     }
 
-    // // // Get the URL of the uploaded file
-    const fileURL = supabase.supabase.storage
+    // Get public URL of the uploaded image
+    const fileURL = await supabase.supabase.storage
       .from("announcments")
-      .getPublicUrl(myId);
-    const newAnnouncement = Announcment;
-
+      .getPublicUrl(data.id);
     const newFileURL = fileURL.data.publicUrl;
-    //console.log(newFileURL);
-    newAnnouncement.image_url = newFileURL;
-    // console.log(newAnnouncement);
-    // // Save file URL to database
-    const { data: updatedData, error: updatedError } = await supabase.supabase
+
+    // Update announcement with image URL in database
+    const { updatedData, updatedError } = await supabase.supabase
       .from("announcments")
       .update({ image_url: newFileURL })
-      .eq("id", myId)
+      .eq("id", data.id)
       .select()
       .single();
 
     if (updatedError) {
-      console.error("Error saving file URL to database:", updatedError.message);
-      return;
-    } else {
-      const requestBody = {
-        title: updatedData.english_title,
-        body: updatedData.english_description,
-      };
-
-      // Call another endpoint (API) with a request body using Axios
-      const response = await axios.post(
-        "http://localhost:3000/notifications/sendPushNotification",
-        requestBody
-      );
-      res.send({ ok: true });
+      throw new Error("Error updating image URL in database");
     }
+
+    // Send push notification
+    const requestBody = {
+      title: updatedData.english_title,
+      body: updatedData.english_description,
+    };
+
+    const response = await axios.post(
+      "http://localhost:3000/notifications/sendPushNotification",
+      requestBody
+    );
+
+    res.send({ ok: true });
   } catch (error) {
     console.error("Error:", error.message);
+    res
+      .status(500)
+      .send({ error: "An error occurred while processing the request" });
+  }
+});
+app.post("/editAnnouncment/:id", async (req, res) => {
+  try {
+    // Extract announcement data from request body
+    const id = req.params.id;
+    const {
+      english_title,
+      english_description,
+      arabic_title,
+      arabic_description,
+      url,
+      valid,
+      image_url,
+    } = req.body;
+    // Insert announcement into database
+    const { data, error } = await supabase.supabase
+      .from("announcments")
+      .update([
+        {
+          english_title,
+          english_description,
+          arabic_title,
+          arabic_description,
+          url,
+          valid,
+        },
+      ])
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error("Error inserting announcement into database");
+    }
+
+    // Upload image to Superbase Storage
+    const { data: fileData, error: uploadError } =
+      await supabase.supabase.storage
+        .from("announcments")
+        .update(id, decode(image_url), { contentType: "image/png" });
+
+    if (uploadError) {
+      console.log(uploadError);
+      throw new Error("Error uploading image to storage");
+    }
+
+    // Get public URL of the uploaded image
+    const fileURL = await supabase.supabase.storage
+      .from("announcments")
+      .getPublicUrl(id);
+    const newFileURL = fileURL.data.publicUrl;
+
+    // Update announcement with image URL in database
+    const { updatedData, updatedError } = await supabase.supabase
+      .from("announcments")
+      .update({ image_url: newFileURL })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (updatedError) {
+      console.log(updatedError);
+      throw new Error("Error updating image URL in database");
+    }
+
+    // Send push notification
+    const requestBody = {
+      title: updatedData.english_title,
+      body: updatedData.english_description,
+    };
+
+    const response = await axios.post(
+      "http://localhost:3000/notifications/sendPushNotification",
+      requestBody
+    );
+
+    res.send({ ok: true });
+  } catch (error) {
+    console.error("Error:", error.message);
+    res
+      .status(500)
+      .send({ error: "An error occurred while processing the request" });
   }
 });
 
@@ -90,9 +181,7 @@ app.get("/getAnnouncment/:id", async (req, res) => {
     .eq("id", id); // Correct
   res.send(data);
 });
-app.get("/", (req, res) => {
-  res.send("Hello, Announcment!");
-});
+
 app.get("/getAnnouncments", async (req, res) => {
   let { data: mainAnnouncments, error } = await supabase.supabase
     .from("announcments")
@@ -108,120 +197,83 @@ app.get("/getValidAnnouncments", async (req, res) => {
     .select("*")
     .eq("valid", true);
 
-  console.log(mydate);
   res.send(data);
 });
-// app.post("/updateAnnouncment", async (req, res) => {
-//   const id = req.body.id;
-//   let image_url = "";
-//   if (typeof req.body.image_url !== typeof "") {
-//     const path = `mainAnnouncments/${id}/image`;
-//     const storageRef = ref(firebase.storage, path);
 
-//     await uploadString(storageRef, req.body.image_url.base64String, "base64");
-//     image_url = await getDownloadURL(storageRef);
-//   } else {
-//     image_url = req.body.image_url;
-//   }
-//   let endDate = null;
-//   if (new Date(req.body.endDate) != "Invalid Date") {
-//     endDate = firebase.timestamp.fromDate(new Date(req.body.endDate));
-//   }
-//   updatedAnnouncement = {
-//     id: id,
-//     english_title: req.body.english_title,
-//     english_description: req.body.english_description,
-//     arabic_title: req.body.arabic_title,
-//     arabic_description: req.body.arabic_description,
-//     url: req.body.url,
-//     image_url: image_url,
-//     publishedDate: firebase.timestamp.fromDate(
-//       new Date(req.body.publishedDate)
-//     ),
-//     endDate: endDate,
-//     permanent: req.body.permanent,
-//   };
-//   updateRedis(updatedAnnouncement);
-//   firebase.db
-//     .collection("main-announcments")
-//     .doc(id)
-//     .update(updatedAnnouncement)
-//     .then((snapshot) => {
-//       res.send(snapshot);
-//     });
-// });
-
-app.delete("/deleteAnnouncment/:index", async (req, res) => {
-  const id = req.params.index;
-
-  const { data: updatedData, error: updateError } = await supabase.supabase
-    .from("announcments")
-    .delete()
-    .match({ id: id });
+app.post("/toggleValid", async (req, res) => {
+  const body = {
+    id: req.body.id,
+    newStatus: req.body.newStatus,
+    tableName: req.body.tableName,
+  };
+  console.log(body.newStatus);
+  console.log(body.id);
+  const { data: data, error: updateError } = await supabase.supabase
+    .from(body.tableName)
+    .update({ valid: body.newStatus })
+    .eq("id", body.id)
+    .select()
+    .single();
   if (updateError) {
+    console.log(updateError);
     res.status(500).send(updateError.message);
   } else {
-    const { data, error } = await supabase.supabase.storage
-      .from("announcments")
-      .remove(id);
-    if (error) {
-      console.log(error);
-      res.status(500);
-    } else {
-      res.send(data);
-    }
+    console.log(data);
+    res.send(data);
   }
 });
 
-// function updateRedis(newitem) {
-//   redisClient.del("main-announcments");
-//   redisClient.del("valid-main-announcments");
+app.get("/getValidServiceAnnouncments/:id", async (req, res) => {
+  const mydate = new Date();
+  const id = req.params.id;
+  const { data, error } = await supabase.supabase
+    .from("service_announcements")
+    .select("*")
+    .eq("service_id", id)
+    .eq("valid", true);
 
-//   // redisClient
-//   //   .get("main-announcments")
-//   //   .then((data) => {
-//   //     if (data) {
-//   //       let tempArr = JSON.parse(data);
-//   //       tempArr = tempArr.filter((item) => item.id !== newitem.id);
-//   //       tempArr.push(newitem);
-//   //       redisClient.del("main-announcments");
-//   //       redisClient.set("main-announcments", JSON.stringify(tempArr), {
-//   //         EX: 60 * 60 * 4,
-//   //         NX: true,
-//   //       });
-//   //       console.log("Success");
+  res.send(data);
+});
+app.post("/addServiceAnnouncment", async (req, res) => {
+  const {
+    servuce_id,
+    message,
+    link,
+    arabic_description,
+    url,
+    valid,
+    image_url,
+  } = req.body;
 
-//   //       //res.send(data);
-//   //     } else {
-//   //       console.log("NO DATA");
-//   //       throw new Error("Data not found");
-//   //     }
-//   //   })
-//   //   .catch((error) => {
-//   //     console.log(`${error.name} : ${error.message}`);
-//   //   });
-//   // redisClient
-//   //   .get("valid-main-announcments")
-//   //   .then((data) => {
-//   //     if (data) {
-//   //       let tempArr = JSON.parse(data);
-//   //       tempArr = tempArr.filter((item) => item.id !== newitem.id);
-//   //       tempArr.push(newitem);
-//   //       redisClient.del("valid-main-announcments");
-//   //       redisClient.set("valid-main-announcments", JSON.stringify(tempArr), {
-//   //         EX: 60 * 60 * 4,
-//   //         NX: true,
-//   //       });
-//   //       console.log("Success");
+  const { data, error } = await supabase.supabase
+    .from("prayerRequests")
+    .insert([prayer]);
+  console.log(error);
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
+app.get("/getServiceAnnouncments/:id", async (req, res) => {
+  const mydate = new Date();
+  const id = req.params.id;
+  const { data, error } = await supabase.supabase
+    .from("service_announcements")
+    .select("*")
+    .eq("service_id", id);
 
-//   //       //res.send(data);
-//   //     } else {
-//   //       console.log("NO DATA");
-//   //       throw new Error("Data not found");
-//   //     }
-//   //   })
-//   //   .catch((error) => {
-//   //     console.log(`${error.name} : ${error.message}`);
-//   //   });
-// }
+  res.send(data);
+});
+app.get("/deleteServiceAnnouncement/:id", async (req, res) => {
+  const mydate = new Date();
+  const id = req.params.id;
+  const { data, error } = await supabase.supabase
+    .from("service_announcements")
+    .select("*")
+    .eq("service_id", id)
+    .eq("valid", true);
+
+  res.send(data);
+});
 module.exports = app;

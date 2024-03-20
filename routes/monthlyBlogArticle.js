@@ -1,13 +1,7 @@
 const express = require("express");
 const bp = require("body-parser");
 const app = express();
-const firebase = require("../config/config");
-const {
-  ref,
-  uploadString,
-  getDownloadURL,
-  deleteObject,
-} = require("firebase/storage");
+const supabase = require("../config/config");
 app.use(bp.json());
 app.use(bp.urlencoded({ extended: true }));
 
@@ -16,41 +10,75 @@ app.get("/", (req, res) => {
 });
 
 app.post("/addMonthlyBlogArticle", async (req, res) => {
-  request = {
+  const blog = {
     english_title: req.body.english_title,
-    EnglishAuthor: req.body.EnglishAuthor,
-    EnglishShortArticle: req.body.EnglishShortArticle,
-    EnglishFullArticle: req.body.EnglishFullArticle,
+    english_author: req.body.english_author,
+    english_article: req.body.english_article,
     arabic_title: req.body.arabic_title,
-    ArabicAuthor: req.body.ArabicAuthor,
-    ArabicShortArticle: req.body.ArabicShortArticle,
-    ArabicFullArticle: req.body.ArabicFullArticle,
-    image_url: req.body.image_url,
-    viewMonth: req.body.viewMonth,
+    arabic_author: req.body.arabic_author,
+    arabic_article: req.body.arabic_article,
+    view_month: req.body.view_month,
   };
+  const image = req.body.image_url;
+  try {
+    // Insert announcement into database
+    const { data, error } = await supabase.supabase
+      .from("announcments")
+      .insert([blog])
+      .select()
+      .single();
 
-  const id = firebase.db.collection("MonthlyBlogArticles").doc().id;
+    if (error) {
+      throw new Error("Error inserting announcement into database");
+    }
 
-  const path = `MonthlyBlogArticles/${id}/image`;
-  const storageRef = ref(firebase.storage, path);
+    // Upload image to Superbase Storage
+    const { data: fileData, error: uploadError } =
+      await supabase.supabase.storage
+        .from("announcments")
+        .upload(data.id, decode(image_url), { contentType: "image/png" });
 
-  await uploadString(storageRef, request.image_url.base64String, "base64");
-  const image_url = await getDownloadURL(storageRef);
-  res.send(
-    firebase.db.collection("MonthlyBlogArticles").doc(id).set({
-      id: id,
-      english_title: request.english_title,
-      EnglishAuthor: request.EnglishAuthor,
-      EnglishShortArticle: request.EnglishShortArticle,
-      EnglishFullArticle: request.EnglishFullArticle,
-      arabic_title: request.arabic_title,
-      ArabicAuthor: request.ArabicAuthor,
-      ArabicShortArticle: request.ArabicShortArticle,
-      ArabicFullArticle: request.ArabicFullArticle,
-      image_url: image_url,
-      viewMonth: request.viewMonth,
-    })
-  );
+    if (uploadError) {
+      console.log(uploadError);
+      throw new Error("Error uploading image to storage");
+    }
+
+    // Get public URL of the uploaded image
+    const fileURL = await supabase.supabase.storage
+      .from("announcments")
+      .getPublicUrl(data.id);
+    const newFileURL = fileURL.data.publicUrl;
+
+    // Update announcement with image URL in database
+    const { updatedData, updatedError } = await supabase.supabase
+      .from("announcments")
+      .update({ image_url: newFileURL })
+      .eq("id", data.id)
+      .select()
+      .single();
+
+    if (updatedError) {
+      throw new Error("Error updating image URL in database");
+    }
+
+    // Send push notification
+    const requestBody = {
+      title: updatedData.english_title,
+      body: updatedData.english_description,
+    };
+
+    const response = await axios.post(
+      "http://localhost:3000/notifications/sendPushNotification",
+      requestBody
+    );
+
+    res.send({ ok: true });
+  } catch (error) {
+    console.error("Error:", error.message);
+    res
+      .status(500)
+      .send({ error: "An error occurred while processing the request" });
+  }
 });
 app.post("/updateMonthlyBlogArticle", async (req, res) => {
   const id = req.body.id;
@@ -98,19 +126,15 @@ app.get("/getMonthlyBlogArticle/:id", (req, res) => {
     });
 });
 
-app.get("/getValidMonthlyBlogArticle", async (req, res) => {
-  const usersRef = firebase.db.collection("MonthlyBlogArticles");
-  const snapshot = await usersRef
-    .where("viewMonth", "==", new Date().getMonth())
-    .limit(1)
-    .get();
+app.get("/getCurrentdMonthlyBlogArticle", async (req, res) => {
+  const cur_month = new Date().getMonth();
+  const { data, error } = await supabase.supabase
+    .from("monthly_blog_article")
+    .select("*")
+    .eq("view_month", cur_month)
+    .single();
 
-  if (snapshot.empty) {
-    return;
-  }
-  snapshot.forEach((doc) => {
-    res.send(doc.data());
-  });
+  res.send(data);
 });
 app.get("/getMonthlyBlogArticles", (req, res) => {
   let blogs = [];

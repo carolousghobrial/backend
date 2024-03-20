@@ -5,9 +5,11 @@ const announcements = require("./routes/announcments");
 const users = require("./routes/users");
 const calendar = require("./routes/calendar");
 const prayerRequests = require("./routes/prayerRequests");
+const diptych = require("./routes/diptych");
 const notifications = require("./routes/notifications");
 const services = require("./routes/services");
 const visitations = require("./routes/visitations");
+const monthlyBlogArticle = require("./routes/monthlyBlogArticle");
 const confessions = require("./routes/confessions");
 var bodyParser = require("body-parser");
 
@@ -32,6 +34,8 @@ app.use("/notifications", notifications);
 app.use("/services", services);
 app.use("/visitations", visitations);
 app.use("/confessions", confessions);
+app.use("/diptych", diptych);
+app.use("/monthlyBlogArticle", monthlyBlogArticle);
 
 app.get("/", (req, res) => {
   res.send("Hello, Express!");

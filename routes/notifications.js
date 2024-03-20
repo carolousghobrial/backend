@@ -28,7 +28,6 @@ app.post("/registerToken", async (req, res) => {
   if (error) {
     if (error.code === "23505") {
       const myData = await getUserByToken(tokenUser.token);
-      console.log(myData);
       res.send(myData);
     } else {
       res.status(500).send(error.message);
@@ -43,6 +42,18 @@ const getGeneralNotificationsToken = async () => {
     .from("user_tokens")
     .select()
     .eq("generalNotificationsAllowed", true);
+  if (error) {
+    return error;
+  } else {
+    return data;
+  }
+};
+const getSubscribedServiceNotificationsToken = async (service_id) => {
+  const { data, error } = await supabase.supabase
+    .from("user_tokens")
+    .select("token")
+    .contains("service_subscribed", [service_id]);
+
   if (error) {
     return error;
   } else {
@@ -86,6 +97,33 @@ app.post("/sendPushNotification", async (req, res) => {
     res.sendStatus(500);
   }
 });
+app.post(
+  "/sendSubscribedServicePushNotification/:service_id",
+  async (req, res) => {
+    try {
+      const service_id = req.params.service_id;
+      const tokens = await getSubscribedServiceNotificationsToken(service_id);
+      const { title, body } = req.body;
+
+      const notifications = tokens.map((token) => ({
+        to: token.token,
+        sound: "default",
+        title,
+        body,
+      }));
+      console.log(notifications);
+      await Promise.all(
+        notifications.map((notification) =>
+          expo.sendPushNotificationsAsync([notification])
+        )
+      );
+
+      res.sendStatus(200);
+    } catch (error) {
+      res.sendStatus(500);
+    }
+  }
+);
 
 app.post("/updateTokenStatus", async (req, res) => {
   // const tokens = await getGeneralNotificationsToken();
@@ -106,6 +144,49 @@ app.post("/updateTokenStatus", async (req, res) => {
   } else {
     res.send(data);
   }
+});
+app.post("/updateNotificationServices", async (req, res) => {
+  const { service_id, token, action } = req.body;
+
+  try {
+    const { data, error } = await supabase.supabase
+      .from("user_tokens")
+      .select("service_subscribed")
+      .eq("token", token)
+      .single();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    let existingArray = data.service_subscribed || [];
+
+    if (action) {
+      existingArray.push(service_id);
+    } else {
+      existingArray = existingArray.filter((item) => item !== service_id);
+    }
+
+    const { data: updatedData, updateError } = await supabase.supabase
+      .from("user_tokens")
+      .update({ service_subscribed: existingArray })
+      .eq("token", token);
+
+    if (updateError) {
+      throw new Error(updateError.message);
+    }
+
+    res.send(updatedData);
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.get("/getNotificationsUser/:token", async (req, res) => {
+  // const tokens = await getGeneralNotificationsToken();
+  const token = req.params.token;
+  const myData = await getUserByToken(token);
+  res.send(myData);
 });
 
 module.exports = app;
