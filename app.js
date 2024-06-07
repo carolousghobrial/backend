@@ -11,7 +11,10 @@ const services = require("./routes/services");
 const visitations = require("./routes/visitations");
 const monthlyBlogArticle = require("./routes/monthlyBlogArticle");
 const confessions = require("./routes/confessions");
+const attendance = require("./routes/attendance");
 var bodyParser = require("body-parser");
+const swaggerJSDoc = require("swagger-jsdoc");
+const swaggerUI = require("swagger-ui-express");
 
 // Increase payload size limit (e.g., 10MB)
 app.use(bodyParser.json({ limit: "10mb" }));
@@ -35,8 +38,27 @@ app.use("/services", services);
 app.use("/visitations", visitations);
 app.use("/confessions", confessions);
 app.use("/diptych", diptych);
+app.use("/attendance", attendance);
 app.use("/monthlyBlogArticle", monthlyBlogArticle);
 
+const options = {
+  definition: {
+    openapi: "3.0.0",
+    info: {
+      title: "Node JS Project",
+      version: "1.0.0",
+    },
+    servers: [
+      {
+        url: "http://localhost:3000/",
+      },
+    ],
+  },
+  apis: ["./routes/*.js"],
+};
+
+const swaggerSpec = swaggerJSDoc(options);
+app.use("/api-docs", swaggerUI.serve, swaggerUI.setup(swaggerSpec));
 app.get("/", (req, res) => {
   res.send("Hello, Express!");
 });

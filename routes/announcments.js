@@ -235,24 +235,76 @@ app.get("/getValidServiceAnnouncments/:id", async (req, res) => {
   res.send(data);
 });
 app.post("/addServiceAnnouncment", async (req, res) => {
-  const {
-    servuce_id,
-    message,
-    link,
-    arabic_description,
-    url,
-    valid,
-    image_url,
-  } = req.body;
+  try {
+    // Extract announcement data from request body
+    const announcement = {
+      service_id: req.body.service_id,
+      message: req.body.message,
+      url: req.body.url,
+      valid: true,
+      image_url: req.body.image_url,
+    };
+    console.log(announcement);
+    // Insert announcement into database
+    const { data, error } = await supabase.supabase
+      .from("service_announcements")
+      .insert([announcement])
+      .select()
+      .single();
 
-  const { data, error } = await supabase.supabase
-    .from("prayerRequests")
-    .insert([prayer]);
-  console.log(error);
-  if (error) {
-    res.status(500).send(error.message);
-  } else {
-    res.send(data);
+    if (error) {
+      console.log(error);
+      throw new Error("Error inserting announcement into database");
+    }
+
+    // Upload image to Superbase Storage
+    const { data: fileData, error: uploadError } =
+      await supabase.supabase.storage
+        .from("service_announcements")
+        .upload(data.id, decode(announcement.image_url), {
+          contentType: "image/png",
+        });
+
+    if (uploadError) {
+      console.log(uploadError);
+      throw new Error("Error uploading image to storage");
+    }
+
+    // Get public URL of the uploaded image
+    const fileURL = await supabase.supabase.storage
+      .from("service_announcements")
+      .getPublicUrl(data.id);
+    const newFileURL = fileURL.data.publicUrl;
+
+    // Update announcement with image URL in database
+    const { updatedData, updatedError } = await supabase.supabase
+      .from("service_announcements")
+      .update({ image_url: newFileURL })
+      .eq("id", data.id)
+      .select()
+      .single();
+
+    if (updatedError) {
+      throw new Error("Error updating image URL in database");
+    }
+
+    // // Send push notification
+    // const requestBody = {
+    //   title: updatedData.m,
+    //   body: updatedData.english_description,
+    // };
+
+    // const response = await axios.post(
+    //   "http://localhost:3000/notifications/sendPushNotification",
+    //   requestBody
+    // );
+
+    res.send({ ok: true });
+  } catch (error) {
+    console.error("Error:", error.message);
+    res
+      .status(500)
+      .send({ error: "An error occurred while processing the request" });
   }
 });
 app.get("/getServiceAnnouncments/:id", async (req, res) => {

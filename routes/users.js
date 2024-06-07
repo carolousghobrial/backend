@@ -174,6 +174,19 @@ app.get("/getFamilyUsersForHead/:familyId", async (req, res) => {
     res.send(profiles);
   }
 });
+app.get("/getUserByPortal/:portal_id", async (req, res) => {
+  const portal_id = req.params.portal_id;
+  const { data: profiles, error } = await supabase.supabase
+    .from("profiles")
+    .select("*")
+    .eq("portal_id", portal_id);
+
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(profiles);
+  }
+});
 app.get("/getRolesAndServiceOfUser/:userId", async (req, res) => {
   const userId = req.params.userId;
 
