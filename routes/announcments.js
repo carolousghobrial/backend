@@ -2,6 +2,7 @@ const express = require("express");
 const bp = require("body-parser");
 const app = express();
 const supabase = require("../config/config");
+const notifications = require("./notifications");
 const { decode } = require("base64-arraybuffer");
 const axios = require("axios");
 
@@ -66,21 +67,17 @@ app.post("/addAnnouncment", async (req, res) => {
       .select()
       .single();
 
-    if (updatedError) {
-      throw new Error("Error updating image URL in database");
-    }
-
+    console.log(updatedError);
+    console.log(updatedData);
     // Send push notification
     const requestBody = {
-      title: updatedData.english_title,
-      body: updatedData.english_description,
+      title: english_title,
+      body: english_description,
     };
-
     const response = await axios.post(
       "http://localhost:3000/notifications/sendPushNotification",
       requestBody
     );
-
     res.send({ ok: true });
   } catch (error) {
     console.error("Error:", error.message);
@@ -226,6 +223,7 @@ app.post("/toggleValid", async (req, res) => {
 app.get("/getValidServiceAnnouncments/:id", async (req, res) => {
   const mydate = new Date();
   const id = req.params.id;
+  console.log(id);
   const { data, error } = await supabase.supabase
     .from("service_announcements")
     .select("*")
@@ -288,16 +286,16 @@ app.post("/addServiceAnnouncment", async (req, res) => {
       throw new Error("Error updating image URL in database");
     }
 
-    // // Send push notification
-    // const requestBody = {
-    //   title: updatedData.m,
-    //   body: updatedData.english_description,
-    // };
+    // Send push notification
+    const requestBody = {
+      title: updatedData.m,
+      body: updatedData.english_description,
+    };
 
-    // const response = await axios.post(
-    //   "http://localhost:3000/notifications/sendPushNotification",
-    //   requestBody
-    // );
+    const response = await axios.post(
+      "http://localhost:3000/notifications/sendPushNotification",
+      requestBody
+    );
 
     res.send({ ok: true });
   } catch (error) {
@@ -326,6 +324,16 @@ app.get("/deleteServiceAnnouncement/:id", async (req, res) => {
     .eq("service_id", id)
     .eq("valid", true);
 
+  res.send(data);
+});
+app.delete("/deleteAnnouncment/:id", async (req, res) => {
+  console.log("HERE");
+  const mydate = new Date();
+  const id = req.params.id;
+  const { data, error } = await supabase.supabase
+    .from("announcments")
+    .delete()
+    .match({ id: id });
   res.send(data);
 });
 module.exports = app;

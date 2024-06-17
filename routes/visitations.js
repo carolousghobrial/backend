@@ -71,8 +71,8 @@ function generateTimeSlots(date, startTime, endTime, slotDuration) {
 
 app.post("/addAvailableSlots", async (req, res) => {
   // Example usage
-  const startDate = "2024-03-01";
-  const endDate = "2024-04-27";
+  const startDate = "2024-06-01";
+  const endDate = "2024-07-27";
   const targetDays = [0, 3, 4]; // Sundays and Thursdays
   const startTime = "18:00"; // Start time for slots
   const endTime = "21:00"; // End time for slots
@@ -86,7 +86,6 @@ app.post("/addAvailableSlots", async (req, res) => {
     endTime,
     slotDuration
   );
-  console.log(availableSlots);
   const { data, error } = await supabase.supabase
     .from("visitation_slots")
     .insert(availableSlots);

@@ -1,6 +1,6 @@
 const express = require("express");
 const app = express();
-const port = process.env.PORT || "3000";
+const port = 3000;
 const announcements = require("./routes/announcments");
 const users = require("./routes/users");
 const calendar = require("./routes/calendar");
@@ -11,8 +11,8 @@ const services = require("./routes/services");
 const visitations = require("./routes/visitations");
 const monthlyBlogArticle = require("./routes/monthlyBlogArticle");
 const confessions = require("./routes/confessions");
-const attendance = require("./routes/attendance");
 var bodyParser = require("body-parser");
+const axios = require("axios");
 
 // Increase payload size limit (e.g., 10MB)
 app.use(bodyParser.json({ limit: "10mb" }));
@@ -36,11 +36,43 @@ app.use("/services", services);
 app.use("/visitations", visitations);
 app.use("/confessions", confessions);
 app.use("/diptych", diptych);
-app.use("/attendance", attendance);
 app.use("/monthlyBlogArticle", monthlyBlogArticle);
 
 app.get("/", (req, res) => {
   res.send("Hello, Express!");
+});
+app.get("/portalList", async (req, res) => {
+  const API_URL = "https://api.suscopts.org/outside/stgeorge_nashville/"; // Replace with your API endpoint
+  const USERNAME = "stgeorgenashville";
+  const PASSWORD = "st!george|st!mina@stgeorge";
+  try {
+    //  const response = await axios.get(API_URL);
+    const response = await fetch(API_URL, {
+      method: "GET",
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${USERNAME}:${PASSWORD}`).toString(
+          "base64"
+        )}`,
+        "Content-Type": "application/json",
+        // Add any other headers as needed
+      },
+    });
+
+    // let { data: users, error } = await supabase.from("congregation").select();
+    // setsuperbaseData(users);
+    if (response.status === 200) {
+      const userData = await response.json();
+      const updated = userData.filter(
+        (user) => user.Email === null || user.Email === ""
+      );
+      console.log(updated.length);
+      res.send(updated);
+    } else {
+      console.error("Request failed:", response.status, response.data);
+    }
+  } catch (error) {
+    console.error("Error:", error);
+  }
 });
 
 app.listen(port, () => {

@@ -59,7 +59,9 @@ function generateTimeSlots(date, startTime, endTime, slotDuration) {
       date: currentTime.format("YYYY-MM-DD"),
       day_of_week: dayNames[currentTime.day()],
       start_time: currentTime.format("HH:mm"),
-      end_time: currentTime.add(slotDuration, "minutes").format("HH:mm"),
+      end_time: currentTime
+        .add(slotDuration, "minutes")
+        .format("YYYY-MM-DD HH:mm"),
       available: true,
     });
   }
@@ -69,11 +71,11 @@ function generateTimeSlots(date, startTime, endTime, slotDuration) {
 
 app.post("/addAvailableSlots", async (req, res) => {
   // Example usage
-  const startDate = "2024-03-01";
-  const endDate = "2024-04-27";
+  const startDate = "2024-06-01";
+  const endDate = "2024-07-27";
   const targetDays = [5]; // Sundays and Thursdays
-  const startTime = "10:30"; // Start time for slots
-  const endTime = "21:30"; // End time for slots
+  const startTime = "18:00"; // Start time for slots
+  const endTime = "20:45"; // End time for slots
   const slotDuration = 15; // Slot duration in minutes
 
   const availableSlots = generateAvailableSlots(
