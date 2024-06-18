@@ -136,18 +136,11 @@ app.get("/getCurrentdMonthlyBlogArticle", async (req, res) => {
 
   res.send(data);
 });
-app.get("/getMonthlyBlogArticles", (req, res) => {
-  let blogs = [];
-  firebase.db
-    .collection("MonthlyBlogArticles")
-    .get()
-    .then((snapshot) => {
-      snapshot.docs.forEach((doc) => {
-        blogs.push(doc.data());
-      });
-
-      res.send(blogs);
-    });
+app.get("/getMonthlyBlogArticles", async (req, res) => {
+  const { data, error } = await supabase.supabase
+    .from("monthly_blog_article")
+    .select("*");
+  res.send(data);
 });
 
 app.delete("/deleteMonthlyBlogArticle/:id", (req, res) => {

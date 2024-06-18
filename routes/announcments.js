@@ -327,13 +327,16 @@ app.get("/deleteServiceAnnouncement/:id", async (req, res) => {
   res.send(data);
 });
 app.delete("/deleteAnnouncment/:id", async (req, res) => {
-  console.log("HERE");
   const mydate = new Date();
   const id = req.params.id;
   const { data, error } = await supabase.supabase
     .from("announcments")
     .delete()
     .match({ id: id });
+
+  const { storagedata, storageerror } = await supabase.supabase.storage
+    .from("announcments")
+    .remove(id);
   res.send(data);
 });
 module.exports = app;
