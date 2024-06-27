@@ -20,12 +20,15 @@ app.post("/logout", async (req, res) => {
 app.post("/login", async (req, res) => {
   const email = req.body.email;
   const password = req.body.password;
+  console.log(email);
   const { data, error } = await supabase.supabase.auth.signInWithPassword({
     email: email,
     password: password,
   });
+  console.log(data);
+  console.log(error);
+
   if (error != null) {
-    console.log(error);
     res.send(error.status);
   } else {
     let { data: profiles, error } = await supabase.supabase
@@ -120,8 +123,13 @@ app.post("/updateUser/:portal_id", async (req, res) => {
     res.send(updatedData);
   }
 });
-app.post("/forgotPassword", (req, res) => {
+app.post("/forgotPassword", async (req, res) => {
   const email = req.body.email;
+  console.log(email);
+  const { data, error } = await supabase.supabase.auth.resetPasswordForEmail(
+    email
+  );
+  res.send(data);
 });
 
 app.get("/getCurrentUser/:uid", async (req, res) => {
