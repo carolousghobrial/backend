@@ -16,29 +16,33 @@ app.get("/", (req, res) => {
 });
 
 app.get("/getEvent/:id", async (req, res) => {
-  let { data: calendar, error } = await supabase.supabase
-    .from("calendar")
+  let { data: deacons_school_hymns, error } = await supabase.supabase
+    .from("deacons_school_hymns")
     .select("*")
     .eq("id", req.params.id);
-  res.send(calendar);
+  res.send(deacons_school_hymns);
 });
 app.get("/", (req, res) => {
   res.send("Hello, Announcment!");
 });
-app.get("/getCalendar", async (req, res) => {
-  let { data: calendar, error } = await supabase.supabase
-    .from("calendar")
+app.get("/getHymns", async (req, res) => {
+  let { data: deacons_school_hymns, error } = await supabase.supabase
+    .from("deacons_school_hymns")
     .select("*");
 
-  res.send(calendar);
+  res.send(deacons_school_hymns);
 });
-app.get("/getCalendarByDate/:index", async (req, res) => {
-  let { data: calendar, error } = await supabase.supabase
-    .from("calendar")
+app.get("/getHymnsByLevel/:level", async (req, res) => {
+  const level = req.params.level;
+  console.log(level);
+  let { data: data, error } = await supabase.supabase
+    .from("deacons_school_hymns")
     .select("*")
-    .eq("eventDay", daysOfWeek[req.params.index]);
-
-  res.send(calendar);
+    .eq("level_hymn_in", level);
+  console.log(data);
+  console.log(error);
+  res.send(data);
+  //res.ok();
 });
 app.post("/updateCalenderEvent/:index", async (req, res) => {
   const id = req.params.index;
@@ -53,7 +57,7 @@ app.post("/updateCalenderEvent/:index", async (req, res) => {
     one_timeEventDate: req.body.one_timeEventDate,
   };
   const { data: updatedData, error: updateError } = await supabase.supabase
-    .from("calendar")
+    .from("deacons_school_hymns")
     .update(CalendarEvent)
     .eq("id", id)
     .select();
@@ -67,7 +71,7 @@ app.delete("/deleteCalenderEvent/:index", async (req, res) => {
   const id = req.params.index;
 
   const { data: updatedData, error: updateError } = await supabase.supabase
-    .from("calendar")
+    .from("deacons_school_hymns")
     .delete()
     .match({ id: id });
   console.log(updateError);
@@ -89,7 +93,7 @@ app.post("/addCalenderEvent", async (req, res) => {
     eventDay: req.body.eventDay,
   };
   const { data: data, error: error } = await supabase.supabase
-    .from("calendar")
+    .from("deacons_school_hymns")
     .insert(CalendarEvent)
     .select();
   console.log(error);

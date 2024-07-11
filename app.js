@@ -5,6 +5,7 @@ const announcements = require("./routes/announcments");
 const users = require("./routes/users");
 const calendar = require("./routes/calendar");
 const prayerRequests = require("./routes/prayerRequests");
+const deaconsSchool = require("./routes/deaconsSchool");
 const diptych = require("./routes/diptych");
 const notifications = require("./routes/notifications");
 const services = require("./routes/services");
@@ -38,6 +39,7 @@ app.use("/confessions", confessions);
 app.use("/diptych", diptych);
 app.use("/attendance", attendance);
 app.use("/monthlyBlogArticle", monthlyBlogArticle);
+app.use("/deaconsSchool", deaconsSchool);
 
 app.get("/", (req, res) => {
   res.send("Hello, Express!");
