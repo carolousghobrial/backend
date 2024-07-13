@@ -67,17 +67,15 @@ app.post("/addAnnouncment", async (req, res) => {
       .select()
       .single();
 
-    console.log(updatedError);
-    console.log(updatedData);
-    // Send push notification
-    const requestBody = {
-      title: english_title,
-      body: english_description,
-    };
-    const response = await axios.post(
-      "http://localhost:3000/notifications/sendPushNotification",
-      requestBody
-    );
+    // // Send push notification
+    // const requestBody = {
+    //   title: english_title,
+    //   body: english_description,
+    // };
+    // const response = await axios.post(
+    //   "http://localhost:3000/notifications/sendPushNotification",
+    //   requestBody
+    // );
     res.send({ ok: true });
   } catch (error) {
     console.error("Error:", error.message);
