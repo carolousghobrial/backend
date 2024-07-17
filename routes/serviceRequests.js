@@ -14,15 +14,15 @@ app.post("/addRequest", async (req, res) => {
     cellphone: req.body.cellphone,
   };
   console.log(request);
-  // const { data, error } = await supabase.supabase
-  //   .from("join_service_request")
-  //   .insert([request]);
-  // console.log(error);
-  // if (error) {
-  //   res.status(500).send(error.message);
-  // } else {
-  //   res.send(data);
-  // }
+  const { data, error } = await supabase.supabase
+    .from("join_service_request")
+    .insert([request]);
+  console.log(error);
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
 });
 
 app.get("/getRequests", async (req, res) => {
