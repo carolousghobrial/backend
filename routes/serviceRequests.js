@@ -8,16 +8,14 @@ app.get("/", (req, res) => {
 });
 
 app.post("/addRequest", async (req, res) => {
-  console.log(req.body);
   request = {
     name: req.body.name,
     cellphone: req.body.cellphone,
+    church_service: req.body.itemPassed,
   };
-  console.log(request);
   const { data, error } = await supabase.supabase
     .from("join_service_request")
     .insert([request]);
-  console.log(error);
   if (error) {
     res.status(500).send(error.message);
   } else {
@@ -29,6 +27,7 @@ app.get("/getRequests", async (req, res) => {
   const { data, error } = await supabase.supabase
     .from("join_service_request")
     .select("*");
+  console.log(error);
   console.log(data);
   if (error) {
     res.status(500).send(error.message);
