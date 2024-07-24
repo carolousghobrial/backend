@@ -49,23 +49,4 @@ app.delete("/deletePrayer/:id", async (req, res) => {
   }
 });
 
-app.get("/getAnnouncments", async (req, res) => {
-  let { data: mainAnnouncments, error } = await supabase.supabase
-    .from("announcments")
-    .select("*");
-
-  res.send(mainAnnouncments);
-});
-app.get("/getValidAnnouncments", async (req, res) => {
-  const mydate = new Date();
-
-  const { data, error } = await supabase.supabase
-    .from("announcments")
-    .select("*")
-    .eq("valid", true);
-
-  console.log(mydate);
-  res.send(data);
-});
-
 module.exports = app;

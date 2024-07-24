@@ -44,6 +44,18 @@ app.get("/getHymnsByLevel/:level", async (req, res) => {
   res.send(data);
   //res.ok();
 });
+app.get("/getRitualsByLevel/:level", async (req, res) => {
+  const level = req.params.level;
+  console.log(level);
+  let { data: data, error } = await supabase.supabase
+    .from("deacons_school_rituals")
+    .select("*")
+    .eq("level", level);
+  console.log(data);
+  console.log(error);
+  res.send(data);
+  //res.ok();
+});
 app.post("/updateCalenderEvent/:index", async (req, res) => {
   const id = req.params.index;
   console.log(req.body);
