@@ -42,7 +42,6 @@ app.get("/getHymnsByLevel/:level", async (req, res) => {
   console.log(data);
   console.log(error);
   res.send(data);
-  //res.ok();
 });
 app.get("/getRitualsByLevel/:level", async (req, res) => {
   const level = req.params.level;
