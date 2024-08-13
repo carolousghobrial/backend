@@ -43,6 +43,19 @@ app.get("/getHymnsByLevel/:level", async (req, res) => {
   console.log(error);
   res.send(data);
 });
+app.get("/getHymn/:id", async (req, res) => {
+  const id = req.params.id;
+  console.log(id);
+  let { data: data, error } = await supabase.supabase
+    .from("deacons_school_hymns")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  console.log(data);
+  console.log(error);
+  res.send(data);
+});
 app.get("/getRitualsByLevel/:level", async (req, res) => {
   const level = req.params.level;
   console.log(level);
