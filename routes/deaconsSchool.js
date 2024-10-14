@@ -68,6 +68,38 @@ app.get("/getRitualsByLevel/:level", async (req, res) => {
   res.send(data);
   //res.ok();
 });
+app.get("/getAltarResponses", async (req, res) => {
+  let { data: deacons_school_hymns, error } = await supabase.supabase
+    .from("deacons_school_altar_responses")
+    .select("*");
+
+  res.send(deacons_school_hymns);
+});
+app.get("/getAltarResponsesByLevel/:level", async (req, res) => {
+  const level = req.params.level;
+  console.log(level);
+  let { data: data, error } = await supabase.supabase
+    .from("deacons_school_altar_responses")
+    .select("*")
+    .eq("level", level);
+  console.log(data);
+  console.log(error);
+  res.send(data);
+  //res.ok();
+});
+app.get("/getAltarResponse/:id", async (req, res) => {
+  const id = req.params.id;
+  console.log(id);
+  let { data: data, error } = await supabase.supabase
+    .from("deacons_school_altar_responses")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  console.log(data);
+  console.log(error);
+  res.send(data);
+});
 app.post("/updateCalenderEvent/:index", async (req, res) => {
   const id = req.params.index;
   console.log(req.body);
