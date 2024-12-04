@@ -41,26 +41,30 @@ app.get("/getCalendarByDate/:index", async (req, res) => {
   res.send(calendar);
 });
 app.post("/updateCalenderEvent/:index", async (req, res) => {
-  const id = req.params.index;
-  console.log(req.body);
+  const id = parseInt(req.params.index, 10);
   const CalendarEvent = {
-    id: req.body.id,
     eventTitle: req.body.eventTitle,
-    repeated: req.body.repeatedStatus,
+    repeated: req.body.repeated,
     starteventTime: req.body.starteventTime,
     location: req.body.location,
     endeventTime: req.body.endeventTime,
     one_timeEventDate: req.body.one_timeEventDate,
+    eventDay: req.body.eventDay,
   };
-  const { data: updatedData, error: updateError } = await supabase.supabase
+  console.log(CalendarEvent);
+
+  const { data, error } = await supabase.supabase
     .from("calendar")
     .update(CalendarEvent)
     .eq("id", id)
     .select();
-  if (updateError) {
+  console.log(id);
+  console.log(data);
+  if (error) {
+    console.log(error);
     res.status(500).send(error.message);
   } else {
-    res.send(updatedData);
+    res.send(data);
   }
 });
 app.delete("/deleteCalenderEvent/:index", async (req, res) => {

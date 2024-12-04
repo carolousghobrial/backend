@@ -89,6 +89,7 @@ app.post("/registerwithoutemail", async (req, res) => {
     family_id: req.body.family_id,
     family_role: req.body.family_role,
   };
+  console.log(newUser);
   const { data, error } = await supabase.supabase
     .from("profiles")
     .insert([newUser]);
@@ -169,6 +170,20 @@ app.get("/getUserById/:id", async (req, res) => {
     res.send(profiles);
   }
 });
+// app.get("/getUsers", async (req, res) => {
+//   const id = req.params.id;
+//   const { data: profiles, error } = await supabase.supabase
+//     .from("profiles")
+//     .select("*")
+//     .eq("id", id)
+//     .single();
+
+//   if (error) {
+//     res.status(500).send(error.message);
+//   } else {
+//     res.send(profiles);
+//   }
+// });
 app.get("/getFamilyUsersForHead/:familyId", async (req, res) => {
   const family_id = req.params.familyId;
   const { data: profiles, error } = await supabase.supabase
@@ -210,36 +225,28 @@ app.get("/getRolesAndServiceOfUser/:userId", async (req, res) => {
   }
 });
 
-app.get("/getUsers", async (req, res) => {
-  const { data, error } = await supabase.supabase.from("profiles").select("*");
+// app.get("/getUsers", async (req, res) => {
+//   const { data, error } = await supabase.supabase.from("profiles").select("*");
 
+//   if (error) {
+//     res.status(500).send(error.message);
+//   } else {
+//     res.send(data);
+//   }
+// });
+
+//   res.send(users);
+// });
+app.delete("/deleteUser/:uid", async (req, res) => {
+  const id = req.params.uid;
+  console.log(id);
+  res.status(200);
+  const { data, error } = await supabase.supabase.auth.admin.deleteUser(id);
   if (error) {
     res.status(500).send(error.message);
   } else {
     res.send(data);
   }
 });
-
-//   res.send(users);
-// });
-// app.delete("/deleteUser/:uid", (req, res) => {
-//   const id = req.params.uid;
-//   firebase.db
-//     .collection("users")
-//     .doc(id)
-//     .delete()
-//     .then((snapshot) => {
-//       const path = `users/${id}/profileImg`;
-//       const storageRef = ref(firebase.storage, path);
-//       deleteObject(storageRef)
-//         .then(() => {
-//           // File deleted successfully
-//           res.send(snapshot);
-//         })
-//         .catch((error) => {
-//           // Uh-oh, an error occurred!
-//         });
-//     });
-// });
 
 module.exports = app;

@@ -191,7 +191,8 @@ app.get("/getValidAnnouncments", async (req, res) => {
     .from("announcments")
     .select("*")
     .eq("valid", true);
-
+  console.log(data);
+  console.log(error);
   res.send(data);
 });
 
