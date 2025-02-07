@@ -126,11 +126,15 @@ app.post("/updateUser/:portal_id", async (req, res) => {
 });
 app.post("/forgotPassword", async (req, res) => {
   const email = req.body.email;
-  console.log(email);
   const { data, error } = await supabase.supabase.auth.resetPasswordForEmail(
     email
   );
-  res.send(data);
+  if (error) {
+    console.log(error);
+    res.status(500).send(error.message);
+  } else {
+    res.status(200);
+  }
 });
 
 app.get("/getCurrentUser/:uid", async (req, res) => {
