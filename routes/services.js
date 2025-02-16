@@ -127,6 +127,7 @@ app.get("/getUserServiceRoles/:user_id", async (req, res) => {
     .select("*")
     .eq("user_id", user_id);
 
+  console.log(user_service);
   if (error) {
     res.status(500).send(error.message);
   } else {

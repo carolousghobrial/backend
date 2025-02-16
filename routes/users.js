@@ -162,16 +162,19 @@ app.get("/getLoggedIn", async (req, res) => {
 });
 app.get("/getUserById/:id", async (req, res) => {
   const id = req.params.id;
-  const { data: profiles, error } = await supabase.supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", id)
-    .single();
-
+  console.log(id);
+  const { data, error } = await supabase.supabase.rpc(
+    "getuserwithrolesandservices",
+    {
+      user_uuid: id,
+    }
+  );
+  console.log(data);
+  console.log(error);
   if (error) {
     res.status(500).send(error.message);
   } else {
-    res.send(profiles);
+    res.send(data);
   }
 });
 // app.get("/getUsers", async (req, res) => {
@@ -206,7 +209,8 @@ app.get("/getUserByPortal/:portal_id", async (req, res) => {
   const { data: profiles, error } = await supabase.supabase
     .from("profiles")
     .select("*")
-    .eq("portal_id", portal_id);
+    .eq("portal_id", portal_id)
+    .single();
 
   if (error) {
     res.status(500).send(error.message);
@@ -229,18 +233,15 @@ app.get("/getRolesAndServiceOfUser/:userId", async (req, res) => {
   }
 });
 
-// app.get("/getUsers", async (req, res) => {
-//   const { data, error } = await supabase.supabase.from("profiles").select("*");
+app.get("/getUsers", async (req, res) => {
+  const { data, error } = await supabase.supabase.from("profiles").select("*");
 
-//   if (error) {
-//     res.status(500).send(error.message);
-//   } else {
-//     res.send(data);
-//   }
-// });
-
-//   res.send(users);
-// });
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
 app.delete("/deleteUser/:uid", async (req, res) => {
   const id = req.params.uid;
   console.log(id);
