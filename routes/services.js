@@ -22,7 +22,7 @@ app.post("/addUserRole", async (req, res) => {
   if (error) {
     res.status(500).send(error.message);
   } else {
-    res.status(200);
+    res.send(data);
   }
 });
 app.post("/addserviceLesson", async (req, res) => {
@@ -60,7 +60,9 @@ app.post("/addserviceLesson", async (req, res) => {
 app.get("/getServices", async (req, res) => {
   const { data, error } = await supabase.supabase
     .from("services_table")
-    .select("*");
+    .select("*")
+    .not("id", "ilike", "%ds_level%");
+
   if (error) {
     res.status(500).send(error.message);
   } else {
@@ -174,6 +176,21 @@ app.get("/getRoles", async (req, res) => {
     res.status(500).send(error.message);
   } else {
     res.send(data);
+  }
+});
+app.delete("/deleteUserRole/:id", async (req, res) => {
+  const id = req.params.id;
+  console.log(id);
+  const { data: data, error: error } = await supabase.supabase
+    .from("user_service_roles")
+    .delete()
+    .match({ id: id });
+  console.log(data);
+  console.log(error);
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send({ ok: true });
   }
 });
 

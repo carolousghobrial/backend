@@ -108,14 +108,11 @@ app.post("/updateUser/:portal_id", async (req, res) => {
     dob: new Date(req.body.dob),
     cellphone: req.body.cellphone,
     email: req.body.email,
-    portal_id: req.body.portal_id,
-    family_id: req.body.family_id,
-    family_role: req.body.family_role,
   };
   console.log(newUser);
   const { data: updatedData, error: updateError } = await supabase.supabase
     .from("profiles")
-    .update({ family_role: newUser.family_role.toUpperCase() })
+    .update(newUser)
     .eq("portal_id", portal_id);
   if (updateError) {
     console.log(updateError);
@@ -245,7 +242,6 @@ app.get("/getUsers", async (req, res) => {
 app.delete("/deleteUser/:uid", async (req, res) => {
   const id = req.params.uid;
   console.log(id);
-  res.status(200);
   const { data, error } = await supabase.supabase.auth.admin.deleteUser(id);
   if (error) {
     res.status(500).send(error.message);
