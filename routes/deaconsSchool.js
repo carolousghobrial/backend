@@ -115,5 +115,41 @@ app.get("/getMemorization/:id", async (req, res) => {
   console.log(data);
   res.send(data);
 });
+app.post("/addDSCalendarForLevel/:level", async (req, res) => {
+  const level = req.params.level;
+
+  const calendarRow = {
+    hymn_id: req.body.hymn_id,
+    calendar_day: req.body.calendar_day,
+    week_num: req.body.week_num,
+    level: level,
+  };
+  const { data, error } = await supabase.supabase
+    .from("ds_calendar_week")
+    .upsert(
+      [calendarRow],
+      { onConflict: ["calendar_day", "level"] } // Ensures uniqueness
+    )
+    .select();
+  console.log(error);
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
+app.get("/getCalendarByLevel/:level", async (req, res) => {
+  const level = req.params.level;
+  let { data: data, error } = await supabase.supabase
+    .from("ds_calendar_week")
+    .select("*")
+    .eq("level", level);
+
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
 
 module.exports = app;

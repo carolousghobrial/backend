@@ -61,8 +61,9 @@ app.get("/getServices", async (req, res) => {
   const { data, error } = await supabase.supabase
     .from("services_table")
     .select("*")
-    .not("id", "ilike", "%ds_level%");
-
+    .not("service_id", "ilike", "%ds_level%");
+  console.log(data);
+  console.log(error);
   if (error) {
     res.status(500).send(error.message);
   } else {
