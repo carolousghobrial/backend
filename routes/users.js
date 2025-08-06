@@ -55,6 +55,7 @@ app.post("/register", async (req, res) => {
     family_id: req.body.family_id,
     family_role: req.body.family_role,
   };
+  console.log(newUser);
   const { data, error } = await supabase.supabase.auth.signUp({
     email: newUser.email,
     password: newUser.password,
@@ -72,14 +73,47 @@ app.post("/register", async (req, res) => {
     },
   });
   if (error) {
+    // Handle "User already registered" (status 422)
     console.log(error);
-    res.status(500).send(error.message);
-  } else {
-    res.send(data);
+    if (
+      error.status === 422 &&
+      error.message.includes("User already registered")
+    ) {
+      // Fetch the existing user
+      const { data: user, error: fetchError } = await supabase.supabase
+        .from("profiles")
+        .select("*")
+        .eq("email", newUser.email)
+        .maybeSingle();
+
+      if (fetchError) {
+        console.error("Failed to fetch user:", fetchError.message);
+        return res
+          .status(500)
+          .send("User exists, but failed to retrieve profile.");
+      }
+
+      return res.status(200).json({
+        message: "User already registered",
+        user,
+      });
+    }
+
+    // Other auth errors
+    return res.status(400).send(error.message);
   }
+  res.send(data);
+
+  // New user created
 });
 app.post("/registerwithoutemail", async (req, res) => {
+  const { data: emailProfile, eerror } = await supabase.supabase
+    .from("profiles")
+    .select("*")
+    .eq("email", req.body.email)
+    .single();
   newUser = {
+    id: emailProfile.id,
     first_name: req.body.first_name,
     last_name: req.body.last_name,
     dob: new Date(req.body.dob),
@@ -89,7 +123,8 @@ app.post("/registerwithoutemail", async (req, res) => {
     family_id: req.body.family_id,
     family_role: req.body.family_role,
   };
-  console.log(newUser);
+  console.log(req.body.email);
+  console.log(emailProfile);
   const { data, error } = await supabase.supabase
     .from("profiles")
     .insert([newUser]);

@@ -115,6 +115,21 @@ app.get("/getMemorization/:id", async (req, res) => {
   console.log(data);
   res.send(data);
 });
+app.get("/getdeaconsschoolextrasbylevel/:level", async (req, res) => {
+  //get_deacons_school_extras_by_level
+  const level = req.params.level;
+  const { data, error } = await supabase.supabase.rpc(
+    "get_deacons_school_extras_by_level",
+    {
+      level_param: level,
+    }
+  );
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
 app.post("/addDSCalendarForLevel/:level", async (req, res) => {
   const level = req.params.level;
 
@@ -129,6 +144,28 @@ app.post("/addDSCalendarForLevel/:level", async (req, res) => {
     .upsert(
       [calendarRow],
       { onConflict: ["calendar_day", "level"] } // Ensures uniqueness
+    )
+    .select();
+  console.log(error);
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
+app.post("/addDSTeacher", async (req, res) => {
+  const level = req.params.level;
+
+  const calendarRow = {
+    teacher_id: req.body.teacher_id,
+    roles: req.body.roles,
+    level: level,
+  };
+  const { data, error } = await supabase.supabase
+    .from("ds_teachers")
+    .upsert(
+      [calendarRow],
+      { onConflict: ["teacher_id"] } // Ensures uniqueness
     )
     .select();
   console.log(error);
