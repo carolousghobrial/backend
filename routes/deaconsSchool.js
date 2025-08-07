@@ -154,27 +154,44 @@ app.post("/addDSCalendarForLevel/:level", async (req, res) => {
   }
 });
 app.post("/addDSTeacher", async (req, res) => {
-  const level = req.params.level;
+  let level = req.body.level;
 
-  const calendarRow = {
-    teacher_id: req.body.teacher_id,
-    roles: req.body.roles,
-    level: level,
+  switch (level) {
+    case "Alpha":
+      level = 1;
+      break;
+    case "Beta":
+      level = 2;
+      break;
+    case "Graduates":
+      level = 13;
+      break;
+    default:
+      level = parseInt(level, 10) + 2;
+      break;
+  }
+
+  const body = {
+    user_id: req.body.teacher_id,
+    role_id: req.body.role,
+    service_id: req.body.service_id, // numeric level after switch
   };
+
+  console.log("Inserting teacher with body:", body);
+
   const { data, error } = await supabase.supabase
     .from("ds_teachers")
-    .upsert(
-      [calendarRow],
-      { onConflict: ["teacher_id"] } // Ensures uniqueness
-    )
+    .insert([body], { onConflict: ["teacher_id"] })
     .select();
-  console.log(error);
+
   if (error) {
+    console.error("Supabase insert error:", error);
     res.status(500).send(error.message);
   } else {
     res.send(data);
   }
 });
+
 app.get("/getCalendarByLevel/:level", async (req, res) => {
   const level = req.params.level;
   let { data: data, error } = await supabase.supabase

@@ -25,8 +25,6 @@ app.post("/login", async (req, res) => {
     email: email,
     password: password,
   });
-  console.log(data);
-  console.log(error);
 
   if (error != null) {
     res.send(error.status);
