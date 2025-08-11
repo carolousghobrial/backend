@@ -128,6 +128,7 @@ app.get("/getMonthlyBlogArticle/:id", (req, res) => {
 
 app.get("/getCurrentdMonthlyBlogArticle", async (req, res) => {
   const cur_month = new Date().getMonth();
+  console.log(cur_month);
   const { data, error } = await supabase.supabase
     .from("monthly_blog_article")
     .select("*")
