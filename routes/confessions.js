@@ -164,7 +164,7 @@ app.post("/api/availability/single", async (req, res) => {
     };
 
     const { data, error } = await supabase.supabase
-      .from("confession_confession_availability_slots")
+      .from("confession_availability_slots")
       .insert([slotData])
       .select();
 
@@ -189,7 +189,7 @@ app.get("/api/availability/range", async (req, res) => {
     const { startDate, endDate } = req.query;
 
     let query = supabase.supabase
-      .from("confession_confession_availability_slots")
+      .from("confession_availability_slots")
       .select("*")
       .in("status", ["available", "booked"])
       .order("slot_date", { ascending: true })
