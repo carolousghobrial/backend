@@ -74,7 +74,6 @@ function generateTimeSlots(date, startTime, endTime, slotDuration) {
       status: "available",
       max_capacity: 1,
       current_bookings: 0,
-      priest_name: "Father Thomas Anderson",
       location: "Main Church",
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -145,7 +144,6 @@ app.post("/api/availability/single", async (req, res) => {
       start_time,
       end_time,
       duration_minutes = 15,
-      priest_name = "Father Thomas Anderson",
       location = "Main Church",
     } = req.body;
 
@@ -157,7 +155,6 @@ app.post("/api/availability/single", async (req, res) => {
       status: "available",
       max_capacity: 1,
       current_bookings: 0,
-      priest_name,
       location,
     };
 
@@ -381,7 +378,6 @@ app.post("/api/confessions/schedule", async (req, res) => {
       notes,
       language_preference,
       is_first_confession,
-      priest_name: slot.priest_name,
       user_name: `${user.first_name} ${user.last_name}`,
       user_email: user.email,
     };
@@ -468,7 +464,7 @@ app.get("/api/confessions/:confessionId", async (req, res) => {
         `
         *,
         users:user_id (first_name, last_name, email, cellphone, dob),
-        confession_availability_slots:availability_slot_id (slot_date, start_time, end_time, location, priest_name)
+        confession_availability_slots:availability_slot_id (slot_date, start_time, end_time, location)
       `
       )
       .eq("id", confessionId)
@@ -719,7 +715,7 @@ app.get("/api/users/:userId/confessions", async (req, res) => {
       .select(
         `
         *,
-        confession_availability_slots:availability_slot_id (slot_date, start_time, location, priest_name)
+        confession_availability_slots:availability_slot_id (slot_date, start_time, location)
       `
       )
       .eq("user_id", userId)
