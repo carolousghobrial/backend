@@ -68,7 +68,6 @@ function generateTimeSlots(date, startTime, endTime, slotDuration) {
 
     slots.push({
       slot_date: currentTime.format("YYYY-MM-DD"),
-      day_of_week: dayNames[currentTime.day()],
       start_time: currentTime.format("HH:mm:ss"),
       end_time: slotEndTime.format("HH:mm:ss"),
       duration_minutes: slotDuration,
@@ -160,7 +159,6 @@ app.post("/api/availability/single", async (req, res) => {
       current_bookings: 0,
       priest_name,
       location,
-      day_of_week: dayNames[moment(slot_date).day()],
     };
 
     const { data, error } = await supabase.supabase
