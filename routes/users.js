@@ -69,6 +69,50 @@ const optionalAuth = async (req, res, next) => {
   next();
 };
 
+// Rate limiting helper for password reset
+const passwordResetAttempts = new Map();
+
+const rateLimitPasswordReset = (req, res, next) => {
+  const email = req.body.email;
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000; // 15 minutes
+  const maxAttempts = 3;
+
+  if (!email) {
+    return next();
+  }
+
+  const attempts = passwordResetAttempts.get(email) || [];
+  const recentAttempts = attempts.filter((time) => now - time < windowMs);
+
+  if (recentAttempts.length >= maxAttempts) {
+    return res.status(429).json({
+      success: false,
+      message:
+        "Too many password reset attempts. Please wait 15 minutes before trying again.",
+    });
+  }
+
+  // Add current attempt
+  recentAttempts.push(now);
+  passwordResetAttempts.set(email, recentAttempts);
+
+  // Clean up old entries periodically
+  if (Math.random() < 0.01) {
+    // 1% chance to clean up
+    for (const [email, attempts] of passwordResetAttempts.entries()) {
+      const validAttempts = attempts.filter((time) => now - time < windowMs);
+      if (validAttempts.length === 0) {
+        passwordResetAttempts.delete(email);
+      } else {
+        passwordResetAttempts.set(email, validAttempts);
+      }
+    }
+  }
+
+  next();
+};
+
 // ==================== PUBLIC ROUTES ====================
 
 app.get("/", async (req, res) => {
@@ -256,10 +300,245 @@ app.post("/register", async (req, res) => {
   }
 });
 
+/**
+ * Enhanced Forgot Password endpoint - FIXED POSITION
+ */
+app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
+  try {
+    console.log("=== Forgot Password Request ===");
+    const { email } = req.body;
+    console.log("Email received:", email);
+
+    // Validate input
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid email address",
+      });
+    }
+
+    console.log("Password reset request for email:", email);
+
+    // Check if user exists in profiles table first
+    const { data: existingUser, error: userCheckError } =
+      await supabase.supabase
+        .from("profiles")
+        .select("id, email, first_name, last_name")
+        .eq("email", email.toLowerCase().trim())
+        .single();
+
+    if (userCheckError && userCheckError.code !== "PGRST116") {
+      // PGRST116 means no rows found
+      console.error("Error checking user existence:", userCheckError);
+      return res.status(500).json({
+        success: false,
+        message: "An error occurred while processing your request",
+      });
+    }
+
+    if (!existingUser) {
+      // For security, we don't reveal if the email exists or not
+      // But we still return success to prevent email enumeration
+      console.log("Password reset requested for non-existent email:", email);
+
+      return res.json({
+        success: true,
+        message:
+          "If an account with that email exists, we've sent a password reset link.",
+        email: email,
+      });
+    }
+
+    // Determine redirect URL based on environment
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://www.stgeorgecocnashville.org";
+    const redirectUrl = `${frontendUrl}/reset-password`;
+
+    console.log("Sending password reset email with redirect to:", redirectUrl);
+
+    // Send password reset email via Supabase Auth
+    const { data, error } = await supabase.supabase.auth.resetPasswordForEmail(
+      email.toLowerCase().trim(),
+      {
+        redirectTo: redirectUrl,
+        // Optional: Add custom data for the email template
+        data: {
+          user_name: existingUser.first_name || "User",
+          reset_url: redirectUrl,
+        },
+      }
+    );
+
+    if (error) {
+      console.error("Supabase password reset error:", error);
+
+      // Handle specific Supabase errors
+      if (error.message.includes("rate limit")) {
+        return res.status(429).json({
+          success: false,
+          message:
+            "Too many reset requests. Please wait a few minutes before trying again.",
+        });
+      }
+
+      if (error.message.includes("not found")) {
+        // Still return success for security
+        return res.json({
+          success: true,
+          message:
+            "If an account with that email exists, we've sent a password reset link.",
+          email: email,
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: "Unable to send password reset email. Please try again later.",
+      });
+    }
+
+    // Log successful password reset request
+    console.log("Password reset email sent successfully to:", email);
+
+    // Optional: Log the reset request in a separate table for audit purposes
+    try {
+      await supabase.supabase.from("password_reset_logs").insert([
+        {
+          email: email,
+          user_id: existingUser.id,
+          requested_at: new Date().toISOString(),
+          ip_address: req.ip || req.connection.remoteAddress,
+          user_agent: req.headers["user-agent"],
+        },
+      ]);
+    } catch (logError) {
+      // Don't fail the main operation if logging fails
+      console.warn("Failed to log password reset request:", logError);
+    }
+
+    res.json({
+      success: true,
+      message:
+        "We've sent a password reset link to your email address. Please check your inbox and follow the instructions.",
+      email: email,
+      // Optional: Include estimated delivery time
+      estimated_delivery: "within 5 minutes",
+    });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    res.status(500).json({
+      success: false,
+      message: "An internal error occurred. Please try again later.",
+    });
+  }
+});
+
+/**
+ * Verify password reset token endpoint (optional - for custom reset flow)
+ */
+app.post("/verifyResetToken", async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "Reset token is required",
+      });
+    }
+
+    // Verify the token with Supabase
+    const {
+      data: { user },
+      error,
+    } = await supabase.supabase.auth.getUser(token);
+
+    if (error || !user) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired reset token",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Reset token is valid",
+      user: {
+        id: user.id,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error("Verify reset token error:", error);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while verifying the reset token",
+    });
+  }
+});
+
+/**
+ * Complete password reset endpoint (optional - for custom reset flow)
+ */
+app.post("/resetPassword", async (req, res) => {
+  try {
+    const { token, new_password } = req.body;
+
+    if (!token || !new_password) {
+      return res.status(400).json({
+        success: false,
+        message: "Reset token and new password are required",
+      });
+    }
+
+    // Validate password strength
+    if (new_password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters long",
+      });
+    }
+
+    // Update password via Supabase Auth
+    const { data, error } = await supabase.supabase.auth.updateUser({
+      password: new_password,
+    });
+
+    if (error) {
+      console.error("Password reset error:", error);
+      return res.status(400).json({
+        success: false,
+        message: "Failed to reset password. Please try again.",
+      });
+    }
+
+    res.json({
+      success: true,
+      message:
+        "Password has been reset successfully. You can now log in with your new password.",
+    });
+  } catch (error) {
+    console.error("Reset password error:", error);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while resetting the password",
+    });
+  }
+});
+
 // ==================== AUTHENTICATED ROUTES ====================
 
 /**
- * Get logged in user info - FIXED
+ * Get logged in user info
  */
 app.get("/getLoggedIn", authenticateToken, async (req, res) => {
   try {
@@ -291,7 +570,7 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
 });
 
 /**
- * Logout endpoint - FIXED
+ * Logout endpoint
  */
 app.post("/logout", authenticateToken, async (req, res) => {
   try {
@@ -325,7 +604,7 @@ app.get("/getUsers", authenticateToken, async (req, res) => {
       .from("profiles")
       .select("*")
       .order("portal_id", { ascending: false });
-    console.log(data);
+
     if (error) {
       console.error("Get users error:", error);
       return res.status(500).json({
@@ -817,287 +1096,114 @@ app.use((error, req, res, next) => {
   });
 });
 /**
- * Enhanced Forgot Password endpoint - UPDATED VERSION
+ * @route POST /api/auth/reset-password
+ * @desc Reset password with token
+ * @access Public
  */
-app.post("/forgotPassword", async (req, res) => {
+app.post("/reset-password", async (req, res) => {
   try {
-    const { email } = req.body;
-    console.log(email);
+    const { token, newPassword } = req.body;
+
     // Validate input
-    if (!email) {
+    if (!token || !newPassword) {
       return res.status(400).json({
         success: false,
-        message: "Email is required",
+        message: "Token and new password are required",
       });
     }
 
-    // Validate email format
-    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-    if (!emailRegex.test(email)) {
+    // Validate password strength
+    if (newPassword.length < 6) {
       return res.status(400).json({
         success: false,
-        message: "Please enter a valid email address",
+        message: "Password must be at least 6 characters long",
       });
     }
 
-    console.log("Password reset request for email:", email);
+    // Hash the token to compare with stored token
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
-    // Check if user exists in profiles table first
-    const { data: existingUser, error: userCheckError } =
-      await supabase.supabase
-        .from("profiles")
-        .select("id, email, first_name, last_name")
-        .eq("email", email.toLowerCase().trim())
-        .single();
-
-    if (userCheckError && userCheckError.code !== "PGRST116") {
-      // PGRST116 means no rows found
-      console.error("Error checking user existence:", userCheckError);
-      return res.status(500).json({
-        success: false,
-        message: "An error occurred while processing your request",
-      });
-    }
-
-    if (!existingUser) {
-      // For security, we don't reveal if the email exists or not
-      // But we still return success to prevent email enumeration
-      console.log("Password reset requested for non-existent email:", email);
-
-      return res.json({
-        success: true,
-        message:
-          "If an account with that email exists, we've sent a password reset link.",
-        email: email,
-      });
-    }
-
-    // Determine redirect URL based on environment
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://www.stgeorgecocnashville.org";
-    const redirectUrl = `${frontendUrl}/reset-password`;
-
-    console.log("Sending password reset email with redirect to:", redirectUrl);
-
-    // Send password reset email via Supabase Auth
-    const { data, error } = await supabase.supabase.auth.resetPasswordForEmail(
-      email.toLowerCase().trim(),
-      {
-        redirectTo: redirectUrl,
-        // Optional: Add custom data for the email template
-        data: {
-          user_name: existingUser.first_name || "User",
-          reset_url: redirectUrl,
-        },
-      }
-    );
-
-    if (error) {
-      console.error("Supabase password reset error:", error);
-
-      // Handle specific Supabase errors
-      if (error.message.includes("rate limit")) {
-        return res.status(429).json({
-          success: false,
-          message:
-            "Too many reset requests. Please wait a few minutes before trying again.",
-        });
-      }
-
-      if (error.message.includes("not found")) {
-        // Still return success for security
-        return res.json({
-          success: true,
-          message:
-            "If an account with that email exists, we've sent a password reset link.",
-          email: email,
-        });
-      }
-
-      return res.status(400).json({
-        success: false,
-        message: "Unable to send password reset email. Please try again later.",
-      });
-    }
-
-    // Log successful password reset request
-    console.log("Password reset email sent successfully to:", email);
-
-    // Optional: Log the reset request in a separate table for audit purposes
-    try {
-      await supabase.supabase.from("password_reset_logs").insert([
-        {
-          email: email,
-          user_id: existingUser.id,
-          requested_at: new Date().toISOString(),
-          ip_address: req.ip || req.connection.remoteAddress,
-          user_agent: req.headers["user-agent"],
-        },
-      ]);
-    } catch (logError) {
-      // Don't fail the main operation if logging fails
-      console.warn("Failed to log password reset request:", logError);
-    }
-
-    res.json({
-      success: true,
-      message:
-        "We've sent a password reset link to your email address. Please check your inbox and follow the instructions.",
-      email: email,
-      // Optional: Include estimated delivery time
-      estimated_delivery: "within 5 minutes",
+    // Find user with valid token
+    const user = await User.findOne({
+      passwordResetToken: hashedToken,
+      passwordResetExpires: { $gt: Date.now() },
     });
-  } catch (error) {
-    console.error("Forgot password error:", error);
-    res.status(500).json({
-      success: false,
-      message: "An internal error occurred. Please try again later.",
-    });
-  }
-});
 
-/**
- * Verify password reset token endpoint (optional - for custom reset flow)
- */
-app.post("/verifyResetToken", async (req, res) => {
-  try {
-    const { token } = req.body;
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: "Reset token is required",
-      });
-    }
-
-    // Verify the token with Supabase
-    const {
-      data: { user },
-      error,
-    } = await supabase.supabase.auth.getUser(token);
-
-    if (error || !user) {
+    if (!user) {
       return res.status(400).json({
         success: false,
         message: "Invalid or expired reset token",
       });
     }
 
-    res.json({
-      success: true,
-      message: "Reset token is valid",
-      user: {
-        id: user.id,
-        email: user.email,
-      },
-    });
-  } catch (error) {
-    console.error("Verify reset token error:", error);
-    res.status(500).json({
-      success: false,
-      message: "An error occurred while verifying the reset token",
-    });
-  }
-});
+    // Hash new password
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
 
-/**
- * Complete password reset endpoint (optional - for custom reset flow)
- */
-app.post("/resetPassword", async (req, res) => {
-  try {
-    const { token, new_password } = req.body;
+    // Update user password and clear reset token
+    user.password = hashedPassword;
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
+    user.passwordChangedAt = new Date();
+    await user.save();
 
-    if (!token || !new_password) {
-      return res.status(400).json({
-        success: false,
-        message: "Reset token and new password are required",
-      });
-    }
-
-    // Validate password strength
-    if (new_password.length < 8) {
-      return res.status(400).json({
-        success: false,
-        message: "Password must be at least 8 characters long",
-      });
-    }
-
-    // Update password via Supabase Auth
-    const { data, error } = await supabase.supabase.auth.updateUser({
-      password: new_password,
-    });
-
-    if (error) {
-      console.error("Password reset error:", error);
-      return res.status(400).json({
-        success: false,
-        message: "Failed to reset password. Please try again.",
-      });
-    }
-
-    res.json({
+    res.status(200).json({
       success: true,
       message:
-        "Password has been reset successfully. You can now log in with your new password.",
+        "Password reset successful. You can now login with your new password.",
     });
   } catch (error) {
     console.error("Reset password error:", error);
     res.status(500).json({
       success: false,
-      message: "An error occurred while resetting the password",
+      message: "Server error. Please try again later.",
     });
   }
 });
 
 /**
- * Rate limiting helper for password reset (optional implementation)
+ * @route GET /api/auth/verify-reset-token
+ * @desc Verify if reset token is valid
+ * @access Public
  */
-const passwordResetAttempts = new Map();
+app.get("/verify-reset-token/:token", async (req, res) => {
+  try {
+    const { token } = req.params;
 
-const rateLimitPasswordReset = (req, res, next) => {
-  const email = req.body.email;
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000; // 15 minutes
-  const maxAttempts = 3;
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "Token is required",
+      });
+    }
 
-  if (!email) {
-    return next();
-  }
+    // Hash the token
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
-  const attempts = passwordResetAttempts.get(email) || [];
-  const recentAttempts = attempts.filter((time) => now - time < windowMs);
+    // Find user with valid token
+    const user = await User.findOne({
+      passwordResetToken: hashedToken,
+      passwordResetExpires: { $gt: Date.now() },
+    });
 
-  if (recentAttempts.length >= maxAttempts) {
-    return res.status(429).json({
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired reset token",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Token is valid",
+      email: user.email, // Optionally return masked email
+    });
+  } catch (error) {
+    console.error("Verify token error:", error);
+    res.status(500).json({
       success: false,
-      message:
-        "Too many password reset attempts. Please wait 15 minutes before trying again.",
+      message: "Server error",
     });
   }
-
-  // Add current attempt
-  recentAttempts.push(now);
-  passwordResetAttempts.set(email, recentAttempts);
-
-  // Clean up old entries periodically
-  if (Math.random() < 0.01) {
-    // 1% chance to clean up
-    for (const [email, attempts] of passwordResetAttempts.entries()) {
-      const validAttempts = attempts.filter((time) => now - time < windowMs);
-      if (validAttempts.length === 0) {
-        passwordResetAttempts.delete(email);
-      } else {
-        passwordResetAttempts.set(email, validAttempts);
-      }
-    }
-  }
-
-  next();
-};
-
-// Apply rate limiting to forgot password endpoint (uncomment to use)
-// app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
-//   // ... forgot password logic here
-// });
-
+});
 module.exports = app;
