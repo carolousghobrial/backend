@@ -85,7 +85,7 @@ app.get("/", async (req, res) => {
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-
+    console.log(email);
     if (!email || !password) {
       return res.status(400).json({
         success: false,
@@ -613,10 +613,6 @@ app.get(
         roles:role_id (
           role_id,
           role_name
-        ),
-        services:service_id (
-          service_id,
-          service_title
         )
       `
         )
