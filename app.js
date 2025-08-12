@@ -32,21 +32,41 @@ app.use((req, res, next) => {
   next();
 });
 
-// Enhanced CORS configuration
+// CORS Configuration for your website
 app.use((req, res, next) => {
   const allowedOrigins = [
+    // Development environments
     "http://localhost:4200",
     "http://localhost:3000",
-    "https://stgeorgecocnashville.org/", // Replace with your actual frontend domain
-    "https://stgntbackend-a14a35aa352d.herokuapp.com/", // If using Netlify
-    "https://your-app.vercel.app", // If using Vercel
+    "http://127.0.0.1:4200",
+    "http://127.0.0.1:3000",
+
+    // Your production website - CORRECTED URLS
+    "https://www.stgeorgecocnashville.org", // Main domain with www
+    "https://stgeorgecocnashville.org", // Domain without www
+
+    // Your backend (if needed for admin panel or direct access)
+    "https://stgntbackend-a14a35aa352d.herokuapp.com",
+
+    // Remove trailing slashes - these are INCORRECT:
+    // ❌ "https://stgeorgecocnashville.org/"
+    // ❌ "https://stgntbackend-a14a35aa352d.herokuapp.com/"
   ];
 
   const origin = req.headers.origin;
 
+  // Log the origin for debugging (remove in production)
+  if (process.env.NODE_ENV === "development") {
+    console.log("Request origin:", origin);
+    console.log("Allowed origins:", allowedOrigins);
+  }
+
   // Allow requests from allowed origins or no origin (for mobile apps, Postman, etc.)
   if (!origin || allowedOrigins.includes(origin)) {
     res.header("Access-Control-Allow-Origin", origin || "*");
+  } else {
+    // Log blocked origins for debugging
+    console.warn("Blocked origin:", origin);
   }
 
   // Essential headers for authentication
@@ -64,6 +84,49 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Credentials", "true");
 
   // Handle preflight requests
+  if (req.method === "OPTIONS") {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
+// Alternative: Environment-based configuration (RECOMMENDED)
+app.use((req, res, next) => {
+  let allowedOrigins = [];
+
+  if (process.env.NODE_ENV === "development") {
+    allowedOrigins = [
+      "http://localhost:4200",
+      "http://localhost:3000",
+      "http://127.0.0.1:4200",
+      "http://127.0.0.1:3000",
+    ];
+  } else {
+    allowedOrigins = [
+      "https://www.stgeorgecocnashville.org",
+      "https://stgeorgecocnashville.org",
+    ].filter(Boolean); // Remove undefined values
+  }
+
+  const origin = req.headers.origin;
+
+  if (!origin || allowedOrigins.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin || "*");
+  }
+
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Access-Token, X-Key"
+  );
+
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+  );
+
+  res.header("Access-Control-Allow-Credentials", "true");
+
   if (req.method === "OPTIONS") {
     res.sendStatus(200);
   } else {
