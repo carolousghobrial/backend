@@ -37,7 +37,7 @@ app.use((req, res, next) => {
   const allowedOrigins = [
     "http://localhost:4200",
     "http://localhost:3000",
-    "https://www.stgeorgecocnashville.org/", // Replace with your actual frontend domain
+    "https://stgeorgecocnashville.org/", // Replace with your actual frontend domain
     "https://stgntbackend-a14a35aa352d.herokuapp.com/", // If using Netlify
     "https://your-app.vercel.app", // If using Vercel
   ];
