@@ -85,6 +85,20 @@ app.get("/getServiceById/:id", async (req, res) => {
     res.send(data);
   }
 });
+app.get("/getDeaconsSchoolClasses", async (req, res) => {
+  const serviceId = req.params.id;
+  const { data, error } = await supabase.supabase
+    .from("services_table")
+    .select("*")
+    .ilike("service_id", "%ds_%"); // %keyword% means contains keyword
+
+  console.log(error);
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
 app.get("/getServiceLessons/:serviceId", async (req, res) => {
   const serviceId = req.params.serviceId;
   const { data, error } = await supabase.supabase

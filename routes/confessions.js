@@ -92,16 +92,25 @@ function generateTimeSlots(date, startTime, endTime, slotDuration) {
 // Create availability slots for a date range
 app.post("/api/availability/generate", async (req, res) => {
   try {
-    const {
-      startDate,
-      endDate,
-      targetDays = [0, 6], // Default: Sunday and Saturday
-      startTime = "09:00",
-      endTime = "17:00",
-      slotDuration = 15,
-      priestName = "Father Thomas Anderson",
-    } = req.body;
+    const { startDate, endDate, targetDays, startTime, endTime, slotDuration } =
+      req.body;
+    console.log(startDate);
+    // Validate required fields
+    if (
+      !startDate ||
+      !endDate ||
+      !targetDays ||
+      !startTime ||
+      !endTime ||
+      !slotDuration
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields",
+      });
+    }
 
+    // Generate slots
     const availableSlots = generateAvailableSlots(
       startDate,
       endDate,
@@ -111,22 +120,19 @@ app.post("/api/availability/generate", async (req, res) => {
       slotDuration
     );
 
-    // Add priest name to all slots
-    availableSlots.forEach((slot) => {
-      slot.priest_name = priestName;
-    });
-
+    // Save to Supabase
     const { data, error } = await supabase.supabase
       .from("confession_availability_slots")
       .insert(availableSlots)
       .select();
-
+    console.log(data);
+    console.log(error);
     if (error) throw error;
 
     res.status(201).json({
       success: true,
       message: `Created ${data.length} availability slots`,
-      data: data,
+      data,
     });
   } catch (error) {
     res.status(500).json({

@@ -191,6 +191,47 @@ app.post("/addDSTeacher", async (req, res) => {
     res.send(data);
   }
 });
+app.put("/updateAllLevels", async (req, res) => {
+  const levelMap = {
+    1: "ds_level_alpha",
+    2: "ds_level_beta",
+    3: "ds_level_1",
+    4: "ds_level_2",
+    5: "ds_level_3",
+    6: "ds_level_4",
+    7: "ds_level_5",
+    8: "ds_level_6",
+    9: "ds_level_7",
+    10: "ds_level_8",
+    11: "ds_level_9",
+    12: "ds_level_10",
+    13: "ds_level_graduates",
+    14: "ds_level_graduates",
+  };
+
+  try {
+    for (let index = 1; index <= 14; index++) {
+      console.log(`Updating index ${index} to ${levelMap[index]}`);
+
+      const { data, error } = await supabase.supabase
+        .from("deacons_school_altar_responses")
+        .update({ level: levelMap[index] })
+        .eq("level", index.toString()) // match the original value
+        .select();
+
+      if (error) {
+        console.error(`Error updating index ${index}:`, error);
+      } else {
+        console.log(`Updated ${data.length} rows for index ${index}`);
+      }
+    }
+
+    res.status(200).send("DONE");
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).send("Server error");
+  }
+});
 
 app.get("/getCalendarByLevel/:level", async (req, res) => {
   const level = req.params.level;
