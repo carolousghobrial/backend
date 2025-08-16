@@ -16,13 +16,78 @@ app.post("/addUserRole", async (req, res) => {
     role_id: req.body.role_id,
     service_id: req.body.service_id,
   };
+  console.log(UserServiceRole);
   const { data, error } = await supabase.supabase
     .from("user_service_roles")
     .insert([UserServiceRole]);
+  console.log("error");
+  console.log(error);
+
   if (error) {
     res.status(500).send(error.message);
   } else {
     res.send(data);
+  }
+});
+app.post("/addUserRoleBulk", async (req, res) => {
+  try {
+    // Extract the array of users and common role/service info
+    const { users, role_id, service_id } = req.body;
+
+    // Validate input
+    if (!users || !Array.isArray(users) || users.length === 0) {
+      return res.status(400).json({
+        error: "Missing or invalid 'users' array in request body",
+      });
+    }
+
+    if (!role_id || !service_id) {
+      return res.status(400).json({
+        error: "Missing required 'role_id' or 'service_id'",
+      });
+    }
+
+    // Create array of user service roles for bulk insert
+    const userServiceRoles = users.map((user_id) => ({
+      user_id: user_id,
+      role_id: role_id,
+      service_id: service_id,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }));
+
+    console.log("Bulk inserting user service roles:", userServiceRoles);
+
+    // Perform bulk insert
+    const { data, error } = await supabase.supabase
+      .from("user_service_roles")
+      .insert(userServiceRoles)
+      .select(); // Add select() to return the inserted data
+
+    if (error) {
+      console.error("Supabase error:", error);
+      return res.status(500).json({
+        error: error.message,
+        details: error.details || "No additional details available",
+      });
+    }
+
+    console.log("Successfully inserted:", data?.length || 0, "records");
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully added ${
+        data?.length || userServiceRoles.length
+      } user role assignments`,
+      inserted_count: data?.length || userServiceRoles.length,
+      data: data,
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({
+      error: "Internal server error",
+      details: err.message,
+    });
   }
 });
 app.post("/addserviceLesson", async (req, res) => {
@@ -60,8 +125,7 @@ app.post("/addserviceLesson", async (req, res) => {
 app.get("/getServices", async (req, res) => {
   const { data, error } = await supabase.supabase
     .from("services_table")
-    .select("*")
-    .not("service_id", "ilike", "%ds_level%");
+    .select("*");
   console.log(data);
   console.log(error);
   if (error) {
@@ -181,6 +245,18 @@ app.get("/getServiceMembers/:service_id", async (req, res) => {
     res.status(500).send(error.message);
   } else {
     res.send(myData);
+  }
+});
+app.get("/getDSTeachers", async (req, res) => {
+  const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
+    "get_deacon_school_teachers"
+  );
+  console.log(rpcData);
+  if (rpcError) {
+    console.log(rpcError);
+    res.status(500).send(rpcError.message);
+  } else {
+    res.send(rpcData);
   }
 });
 app.get("/getRoles", async (req, res) => {
