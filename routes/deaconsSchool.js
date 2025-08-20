@@ -137,8 +137,12 @@ app.post("/addDSCalendarForLevel/:level", async (req, res) => {
     hymn_id: req.body.hymn_id,
     calendar_day: req.body.calendar_day,
     week_num: req.body.week_num,
+    others_id: req.body.others_id,
+    others_tablename: req.body.others_tablename,
+    teacher_id: req.body.teacher_id,
     level: level,
   };
+  console.log(calendarRow);
   const { data, error } = await supabase.supabase
     .from("ds_calendar_week")
     .upsert(
