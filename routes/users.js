@@ -311,6 +311,7 @@ app.post("/verifyResetToken/:token", async (req, res) => {
         message: "Reset token is required",
       });
     }
+    console.log(token);
 
     console.log("Verifying reset token:", token);
 
@@ -318,8 +319,10 @@ app.post("/verifyResetToken/:token", async (req, res) => {
     const {
       data: { user },
       error,
-    } = await supabase.supabase.auth.getUser(token);
-    console.log(user);
+    } = await supabase.supabase.auth.verifyOtp({
+      type: "recovery",
+      token_hash: token, // token from your reset link
+    });
     if (error || !user) {
       console.error("Token verification error:", error);
       return res.status(400).json({
@@ -555,19 +558,6 @@ app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
     console.log("Password reset email sent successfully to:", email);
 
     // Optional: Log the reset request
-    try {
-      await supabase.supabase.from("password_reset_logs").insert([
-        {
-          email: email,
-          user_id: existingUser.id,
-          requested_at: new Date().toISOString(),
-          ip_address: req.ip || req.connection.remoteAddress,
-          user_agent: req.headers["user-agent"],
-        },
-      ]);
-    } catch (logError) {
-      console.warn("Failed to log password reset request:", logError);
-    }
 
     res.json({
       success: true,
