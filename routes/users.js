@@ -368,7 +368,7 @@ app.post("/resetPassword", async (req, res) => {
     if (!token || !new_password) {
       return res.status(400).json({
         success: false,
-        message: "Reset token and new password are required",
+        message: "Access token and new password are required",
       });
     }
 
@@ -379,18 +379,24 @@ app.post("/resetPassword", async (req, res) => {
       });
     }
 
-    // Use your existing supabase instance
-    const { data, error } = await supabase.supabase.auth.admin.updateUserById(
-      token, // This would need to be the user ID, not token
-      { password: new_password }
-    );
+    // Now update the password
+    const { data: updatedUser, error: updateError } =
+      await supabase.supabase.auth.updateUser({
+        password: new_password,
+      });
 
-    // OR use the service role approach:
-    // This requires the token to contain user info
+    if (updateError) {
+      console.error("Password update error:", updateError.message);
+      return res.status(400).json({
+        success: false,
+        message: "Failed to update password",
+      });
+    }
 
     res.json({
       success: true,
       message: "Password reset successfully",
+      user: updatedUser,
     });
   } catch (error) {
     console.error("Reset password error:", error);
@@ -883,21 +889,13 @@ app.get(
     try {
       const { userId } = req.params;
 
-      const { data: userServiceRoles, error } = await supabase.supabase
-        .from("user_service_roles")
-        .select(
-          `
-        *,
-        roles:role_id (
-          role_id,
-          role_name
-        )
-      `
-        )
-        .eq("user_id", userId);
+      const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
+        "getuserwithrolesandservices",
+        { p_user_id: userId }
+      );
 
-      if (error) {
-        console.error("Get user roles error:", error);
+      if (rpcError) {
+        console.error("Get user roles error:", rpcError);
         return res.status(500).json({
           success: false,
           message: error.message,
@@ -906,7 +904,7 @@ app.get(
 
       res.json({
         success: true,
-        data: userServiceRoles || [],
+        data: rpcData || [],
       });
     } catch (error) {
       console.error("Get user roles error:", error);
