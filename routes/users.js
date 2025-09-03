@@ -646,13 +646,13 @@ app.post("/logout", authenticateToken, async (req, res) => {
 /**
  * Get all users
  */
-app.get("/getUsers", authenticateToken, async (req, res) => {
+app.get("/getUsers", async (req, res) => {
   try {
     const { data, error } = await supabase.supabase
       .from("profiles")
       .select("*")
       .order("portal_id", { ascending: false });
-
+    console.log(error);
     if (error) {
       console.error("Get users error:", error);
       return res.status(500).json({
@@ -661,10 +661,7 @@ app.get("/getUsers", authenticateToken, async (req, res) => {
       });
     }
 
-    res.json({
-      success: true,
-      data: data || [],
-    });
+    res.send(data);
   } catch (error) {
     console.error("Get users error:", error);
     res.status(500).json({
@@ -819,7 +816,7 @@ app.post("/updateUser/:portal_id", authenticateToken, async (req, res) => {
 /**
  * Create user (for admin purposes)
  */
-app.post("/createUser", authenticateToken, async (req, res) => {
+app.post("/createUser", async (req, res) => {
   try {
     const {
       first_name,

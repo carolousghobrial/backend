@@ -298,12 +298,12 @@ app.get("/getDSTeachers", async (req, res) => {
     res.send(rpcData);
   }
 });
-app.get("/getDSTeachersByLevel/:level", async (req, res) => {
-  const level = req.params.level;
-  console.log(level);
+app.get("/getDSTeachersByCourse/:course_id", async (req, res) => {
+  const course_id = req.params.course_id;
+  console.log(course_id);
   const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
-    "get_ds_teachers_by_level",
-    { level: level }
+    "get_ds_teachers_by_course",
+    { p_course_id: course_id }
   );
   console.log(rpcData);
   if (rpcError) {

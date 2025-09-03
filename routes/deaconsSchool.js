@@ -122,6 +122,94 @@ app.get("/getMyCoursesTaught/:id", async (req, res) => {
     res.send(data);
   }
 });
+app.post("/addCoursesToCalendar", async (req, res) => {
+  const levelMap = {
+    1: "ds_level_alpha",
+    2: "ds_level_beta",
+    3: "ds_level_1",
+    4: "ds_level_2",
+    5: "ds_level_3",
+    6: "ds_level_4",
+    7: "ds_level_5",
+    8: "ds_level_6",
+    9: "ds_level_7",
+    10: "ds_level_8",
+    11: "ds_level_9",
+    12: "ds_level_10",
+    13: "ds_level_graduates",
+    14: "ds_level_graduates",
+  };
+
+  try {
+    const results = [];
+
+    for (let index = 1; index <= 14; index++) {
+      const level = levelMap[index];
+      console.log(`Updating index ${index} to ${level}`);
+
+      // Get all courses for this level
+      const { data: courses, error: coursesError } = await supabase.supabase
+        .from("ds_courses")
+        .select("course_id")
+        .eq("level", level);
+
+      if (coursesError) {
+        console.error(`Error fetching courses for ${level}:`, coursesError);
+        results.push({ level, error: coursesError.message });
+        continue; // skip this level, move to next
+      }
+
+      if (!courses || courses.length === 0) {
+        console.warn(`No courses found for ${level}`);
+        results.push({ level, message: "No courses found" });
+        continue;
+      }
+
+      // Extract course_ids into an array
+      const courseIds = courses.map((c) => c.course_id);
+      console.log(`Course IDs for ${level}:`, courseIds);
+
+      // Update calendar with array of course_ids
+      const { data: updateData, error: updateError } = await supabase.supabase
+        .from("ds_calendar_week")
+        .update({
+          courses_id: courseIds, // assumes courses_id column is an array type
+        })
+        .eq("level", level)
+        .select();
+
+      if (updateError) {
+        console.error(`Error updating calendar for ${level}:`, updateError);
+        results.push({ level, error: updateError.message });
+      } else {
+        results.push({ level, updated: updateData });
+      }
+    }
+
+    // Return all results after loop finishes
+    return res.json(results);
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/getStudentCourses/:id", async (req, res) => {
+  const portal_id = req.params.id;
+  const { data, error } = await supabase.supabase.rpc(
+    "get_ds_student_courses_by_portal_id",
+    {
+      p_user_id: portal_id,
+    }
+  );
+  console.log(data);
+  console.log(error);
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
 app.get("/getMemorization", async (req, res) => {
   let { data: deacons_school_hymns, error } = await supabase.supabase
     .from("deacons_school_memorization")
@@ -150,21 +238,46 @@ app.get("/getMemorization/:id", async (req, res) => {
   console.log(data);
   res.send(data);
 });
-app.get("/getdeaconsschoolextrasbylevel/:level", async (req, res) => {
-  //get_deacons_school_extras_by_level
-  const level = req.params.level;
-  const { data, error } = await supabase.supabase.rpc(
-    "get_deacons_school_extras_by_level",
-    {
-      level_param: level,
+app.get("/getdeaconsschoolextrasbylevel/:course_id", async (req, res) => {
+  const course_id = req.params.course_id;
+
+  try {
+    // Step 1: get course level from ds_courses
+    const { data: courseData, error: courseError } = await supabase.supabase
+      .from("ds_courses")
+      .select("level")
+      .eq("course_id", course_id)
+      .single(); // since course_id is unique
+
+    if (courseError) {
+      console.error("Error fetching course level:", courseError);
+      return res.status(500).json({ error: courseError.message });
     }
-  );
-  if (error) {
-    res.status(500).send(error.message);
-  } else {
-    res.send(data);
+
+    if (!courseData) {
+      return res.status(404).json({ message: "No course found with that ID" });
+    }
+
+    const level = courseData.level;
+
+    // Step 2: call your RPC function with the level
+    const { data: extrasData, error: extrasError } =
+      await supabase.supabase.rpc("get_deacons_school_extras_by_level", {
+        level_param: level,
+      });
+
+    if (extrasError) {
+      console.error("Error fetching extras:", extrasError);
+      return res.status(500).json({ error: extrasError.message });
+    }
+
+    return res.json(extrasData);
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
+
 app.post("/addDSCalendarForLevel/:level", async (req, res) => {
   const level = req.params.level;
 
@@ -364,7 +477,7 @@ app.get("/getClassSession/:courseId/:date", async (req, res) => {
       .eq("course_id", courseId)
       .eq("session_date", date)
       .single();
-
+    console.log(data);
     if (error && error.code !== "PGRST116") {
       console.error("Error fetching class session:", error);
       return res.status(500).json({
@@ -372,26 +485,8 @@ app.get("/getClassSession/:courseId/:date", async (req, res) => {
         error: error.message,
       });
     }
-    console.log(data);
-    if (!data) {
-      body = { course_id: courseId, session_date: date };
-      console.log(body);
-      const { adddata, adderror } = await supabase.supabase
-        .from("ds_class_sessions")
-        .insert([body])
-        .select();
-      if (adderror) {
-        console.error("Error fetching class session:", adderror);
-        return res.status(500).json({
-          success: false,
-          error: error.message,
-        });
-      }
-      console.log(adddata);
-      res.send(adddata);
-    } else {
-      res.json(data);
-    }
+    res.send(data);
+
     // PGRST116 means no rows found, which is normal for new sessions
   } catch (error) {
     console.error("Get class session error:", error);
@@ -438,7 +533,7 @@ app.get("/getAttendanceBySession/:sessionId", async (req, res) => {
       )
       .eq("session_id", sessionId)
       .order("users(first_name)", { ascending: true });
-
+    console.log(data);
     if (error) {
       console.error("Error fetching attendance records:", error);
       return res.status(500).json({
@@ -452,6 +547,7 @@ app.get("/getAttendanceBySession/:sessionId", async (req, res) => {
       student_id: record.student_id,
       session_id: record.session_id,
       present: record.present,
+      good_behavior: record.good_behavior,
       notes: record.notes,
       recorded_by: record.recorded_by,
       recorded_at: record.recorded_at,
@@ -487,7 +583,6 @@ app.get("/getAttendanceBySession/:sessionId", async (req, res) => {
     });
   }
 });
-
 /**
  * Create new attendance session with records
  * POST /createAttendance
@@ -525,33 +620,60 @@ app.post("/createAttendance", async (req, res) => {
         error: "Invalid date format. Use YYYY-MM-DD",
       });
     }
-    session_body = {};
-    //create session instance
-    const { data, error } = await supabase.supabase
+
+    // First, create the class session
+    const sessionBody = {
+      course_id: course_id,
+      session_date: session_date,
+      topic: topic || null,
+      notes: notes || null,
+      recorded_by: recorded_by,
+      created_at: new Date().toISOString(),
+    };
+
+    console.log("Creating session with data:", sessionBody);
+
+    const { data: sessionData, error: sessionError } = await supabase.supabase
       .from("ds_class_sessions")
-      .insert([]);
-    // Get current user ID (you'll need to implement this based on your auth system)
+      .insert([sessionBody])
+      .select()
+      .single();
+
+    if (sessionError) {
+      console.error("Error creating session:", sessionError);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to create class session",
+        details: sessionError.message,
+      });
+    }
+
+    console.log("Session created:", sessionData);
 
     // Validate and prepare attendance records
     const validatedRecords = [];
     for (const record of attendance_records) {
-      if (!record.student_id || !record.status) {
+      if (!record.student_id || record.present === undefined) {
         return res.status(400).json({
           success: false,
-          error: "Each attendance record must have student_id and status",
+          error:
+            "Each attendance record must have student_id and present status",
         });
       }
-
+      console.log(course_id);
       validatedRecords.push({
+        course_id: course_id,
         student_id: record.student_id,
-        session_id: session.session_id,
-        status: record.status,
-        arrival_time: record.arrival_time || null,
+        session_id: sessionData.session_id, // Use the created session ID
+        good_behavior: record.good_behavior, // Use 'present' field, not 'status'
+        present: record.present, // Use 'present' field, not 'status'
         notes: record.notes || null,
         recorded_by: recorded_by,
         recorded_at: new Date().toISOString(),
       });
     }
+
+    console.log("Creating attendance records:", validatedRecords);
 
     // Insert attendance records
     const { data: attendanceData, error: attendanceError } =
@@ -567,11 +689,12 @@ app.post("/createAttendance", async (req, res) => {
       await supabase.supabase
         .from("ds_class_sessions")
         .delete()
-        .eq("session_id", session.session_id);
+        .eq("session_id", sessionData.session_id);
 
       return res.status(500).json({
         success: false,
         error: "Failed to create attendance records",
+        details: attendanceError.message,
       });
     }
 
@@ -579,7 +702,7 @@ app.post("/createAttendance", async (req, res) => {
       success: true,
       message: "Attendance created successfully",
       data: {
-        session: session,
+        session: sessionData,
         attendance_records: attendanceData,
         total_records: attendanceData.length,
       },
@@ -600,13 +723,13 @@ app.post("/createAttendance", async (req, res) => {
 app.put("/updateAttendance/:sessionId", async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const { topic, notes, recorded_by, attendance_records } = req.body;
-    console.log(sessionId);
+    const { topic, notes, recorded_by, attendance_records, course_id } =
+      req.body;
+
     if (!sessionId) {
-      return res.status(400).json({
-        success: false,
-        error: "Session ID is required",
-      });
+      return res
+        .status(400)
+        .json({ success: false, error: "Session ID is required" });
     }
 
     if (!Array.isArray(attendance_records)) {
@@ -616,7 +739,7 @@ app.put("/updateAttendance/:sessionId", async (req, res) => {
       });
     }
 
-    // Update session information
+    // Update session info
     const { error: sessionError } = await supabase.supabase
       .from("ds_class_sessions")
       .update({
@@ -628,53 +751,43 @@ app.put("/updateAttendance/:sessionId", async (req, res) => {
 
     if (sessionError) {
       console.error("Error updating session:", sessionError);
-      return res.status(500).json({
-        success: false,
-        error: "Failed to update session",
-      });
+      return res
+        .status(500)
+        .json({ success: false, error: "Failed to update session" });
     }
 
-    // Delete existing attendance records for this session
-    const { error: deleteError } = await supabase.supabase
+    // Validate and prepare attendance records
+    const validatedRecords = attendance_records.map((record) => ({
+      course_id,
+      student_id: record.student_id,
+      session_id: sessionId,
+      present: record.present,
+      good_behavior: record.good_behavior,
+      notes: record.notes || null,
+      recorded_by,
+      recorded_at: new Date().toISOString(),
+    }));
+    console.log(validatedRecords);
+    // Insert/update attendance
+    // First, delete existing attendance for this session
+    await supabase.supabase
       .from("ds_attendance")
       .delete()
       .eq("session_id", sessionId);
 
-    if (deleteError) {
-      console.error("Error deleting old attendance records:", deleteError);
-      return res.status(500).json({
-        success: false,
-        error: "Failed to update attendance records",
-      });
-    }
-
-    // Validate and insert new attendance records
-    const validatedRecords = [];
-    for (const record of attendance_records) {
-      body = {
-        student_id: record.student_id,
-        session_id: sessionId,
-        present: record.present,
-        notes: record.notes || null,
-        recorded_by: recorded_by,
-        recorded_at: new Date().toISOString(),
-      };
-      console.log(body);
-      validatedRecords.push(body);
-    }
-
-    // Insert updated attendance records
+    // Then insert the new records
     const { data: attendanceData, error: attendanceError } =
       await supabase.supabase
         .from("ds_attendance")
         .insert(validatedRecords)
         .select();
-    console.log(attendanceError);
+
+    console.log("Attendance upsert result:", {
+      attendanceData,
+      attendanceError,
+    });
+
     if (attendanceError) {
-      console.error(
-        "Error inserting updated attendance records:",
-        attendanceError
-      );
       return res.status(500).json({
         success: false,
         error: "Failed to update attendance records",
@@ -686,15 +799,12 @@ app.put("/updateAttendance/:sessionId", async (req, res) => {
       message: "Attendance updated successfully",
       data: {
         attendance_records: attendanceData,
-        total_records: attendanceData.length,
+        total_records: attendanceData?.length || 0,
       },
     });
   } catch (error) {
     console.error("Update attendance error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-    });
+    res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
@@ -746,10 +856,9 @@ app.get("/getCurrentUser", async (req, res) => {
  * Get attendance statistics for a course
  * GET /getAttendanceStats/:courseId
  */
-app.get("/getAttendanceStats/:courseId", async (req, res) => {
+app.get("/getAttendanceScores/:studentId/:courseId", async (req, res) => {
   try {
-    const { courseId } = req.params;
-    const { startDate, endDate } = req.query;
+    const { studentId, courseId } = req.params;
 
     if (!courseId) {
       return res.status(400).json({
@@ -996,17 +1105,621 @@ app.put("/updateAllLevels", async (req, res) => {
   }
 });
 
-app.get("/getCalendarByLevel/:level", async (req, res) => {
-  const level = req.params.level;
-  let { data: data, error } = await supabase.supabase
+app.get("/getCalendarByCourse/:course_id", async (req, res) => {
+  const course_id = req.params.course_id;
+  console.log(course_id);
+  let { data, error } = await supabase.supabase
     .from("ds_calendar_week")
     .select("*")
-    .eq("level", level);
-
+    .contains("courses_id", [course_id]); // course_id must be inside an array
   if (error) {
     res.status(500).send(error.message);
   } else {
     res.send(data);
+  }
+});
+
+// Get all grading categories
+app.get("/getGradingCategories", async (req, res) => {
+  try {
+    const { data, error } = await supabase.supabase
+      .from("ds_grading_categories")
+      .select("*")
+      .eq("is_active", true)
+      .order("category_name");
+
+    if (error) {
+      console.error("Error fetching grading categories:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Get quarters/terms
+app.get("/getQuarters", async (req, res) => {
+  try {
+    const { data, error } = await supabase.supabase
+      .from("ds_quarters")
+      .select("*")
+      .eq("is_active", true)
+      .order("start_date", { ascending: false });
+
+    if (error) {
+      console.error("Error fetching quarters:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Get assessment items by category
+app.get("/getAssessmentItems/:categoryId/:course_id", async (req, res) => {
+  try {
+    const { categoryId, course_id } = req.params;
+
+    const { data, error } = await supabase.supabase
+      .from("ds_assessment_items")
+      .select(
+        `
+        *,
+        ds_grading_categories:category_id (
+          category_name,
+          weight_percentage
+        )
+      `
+      )
+      .eq("category_id", categoryId)
+      .eq("course_id", course_id)
+      .eq("is_active", true)
+      .order("item_name");
+
+    if (error) {
+      console.error("Error fetching assessment items:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+// Get assessment items by category
+app.get("/getAssessmentItemsByCourse/:course_id", async (req, res) => {
+  try {
+    const { course_id } = req.params;
+
+    const { data, error } = await supabase.supabase
+      .from("ds_assessment_items")
+      .select(
+        `
+        *,
+        ds_grading_categories:category_id (
+          category_name,
+          weight_percentage
+        )
+      `
+      )
+      .eq("course_id", course_id)
+      .eq("is_active", true)
+      .order("item_name");
+
+    if (error) {
+      console.error("Error fetching assessment items:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Get available hymns/rituals/etc for assessment creation
+app.get("/getAvailableItems/:category", async (req, res) => {
+  try {
+    const { category } = req.params;
+    let tableName;
+    let selectFields = "id, *";
+
+    switch (category) {
+      case "hymns":
+        tableName = "deacons_school_hymns";
+        selectFields = "id, name, points, level_hymn_in";
+        break;
+      case "rituals":
+        tableName = "deacons_school_rituals";
+        selectFields = "id, name, level";
+        break;
+      case "memorization":
+        tableName = "deacons_school_memorization";
+        selectFields = "id, name, level";
+        break;
+      case "altar_responses":
+        tableName = "deacons_school_altar_responses";
+        selectFields = "id, name, level";
+        break;
+      default:
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid category" });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from(tableName)
+      .select(selectFields)
+      .order("name");
+
+    if (error) {
+      console.error(`Error fetching ${category}:`, error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Create assessment item
+app.post("/createAssessmentItem", async (req, res) => {
+  try {
+    const {
+      category_id,
+      course_id,
+      max_points,
+      item_name,
+      item_reference,
+      reference_id,
+    } = req.body;
+    console.log(course_id);
+    console.log(item_name);
+    console.log(course_id);
+    if (!category_id || !item_name || !course_id) {
+      return res.status(400).json({
+        success: false,
+        error: "Category ID and item name are required",
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_assessment_items")
+      .insert([
+        {
+          category_id,
+          course_id,
+          max_points,
+          item_name,
+          item_reference: item_reference || null,
+          reference_id: reference_id || null,
+          is_active: true,
+        },
+      ])
+      .select();
+
+    if (error) {
+      console.error("Error creating assessment item:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data: data[0] });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Get student scores
+app.get("/getStudentScores/:studentId/:courseId", async (req, res) => {
+  try {
+    const { studentId, courseId } = req.params;
+
+    const { data, error } = await supabase.supabase.rpc(
+      "get_student_all_scores",
+      {
+        p_student_id: studentId,
+        p_course_id: courseId,
+      }
+    );
+    console.log(data);
+    if (error) {
+      console.error("Error fetching scores:", error);
+    } else {
+      console.log("All Scores (including attendance & behavior):", data);
+    }
+
+    if (error) {
+      console.error("Error fetching student scores:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Submit student score
+app.post("/submitStudentScore", async (req, res) => {
+  try {
+    const {
+      student_id,
+      course_id,
+      quarter_id,
+      item_id,
+      points_earned,
+      scored_by,
+      notes,
+    } = req.body;
+
+    // Validation
+    if (
+      !student_id ||
+      !course_id ||
+      !quarter_id ||
+      !item_id ||
+      points_earned === undefined
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "All required fields must be provided",
+      });
+    }
+
+    // Get points possible (will be set by trigger, but we can calculate for response)
+    const { data: itemData } = await supabase.supabase
+      .from("ds_assessment_items")
+      .select("item_reference, reference_id")
+      .eq("item_id", item_id)
+      .single();
+
+    let points_possible = 100; // default
+    if (
+      itemData?.item_reference === "deacons_school_hymns" &&
+      itemData?.reference_id
+    ) {
+      const { data: hymnData } = await supabase.supabase
+        .from("deacons_school_hymns")
+        .select("points")
+        .eq("id", itemData.reference_id)
+        .single();
+      points_possible = hymnData?.points || 100;
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_student_scores")
+      .upsert(
+        [
+          {
+            student_id,
+            course_id,
+            quarter_id,
+            item_id,
+            points_earned: parseFloat(points_earned),
+            points_possible,
+            scored_by,
+            notes: notes || null,
+            scored_date: new Date().toISOString().split("T")[0],
+          },
+        ],
+        {
+          onConflict: "student_id,course_id,quarter_id,item_id",
+        }
+      )
+      .select();
+
+    if (error) {
+      console.error("Error submitting student score:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({
+      success: true,
+      message: "Score submitted successfully",
+      data: data[0],
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Submit multiple scores (batch)
+app.post("/submitBatchScores", async (req, res) => {
+  try {
+    const { scores, scored_by } = req.body;
+
+    if (!Array.isArray(scores) || scores.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Scores array is required",
+      });
+    }
+
+    // Prepare scores with scored_by and date
+    const processedScores = scores.map((score) => ({
+      ...score,
+      points_earned: parseFloat(score.points_earned),
+      scored_by,
+      scored_date: new Date().toISOString().split("T")[0],
+    }));
+
+    const { data, error } = await supabase.supabase
+      .from("ds_student_scores")
+      .upsert(processedScores, {
+        onConflict: "student_id, course_id, item_id",
+      })
+      .select();
+
+    if (error) {
+      console.error("Error submitting batch scores:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({
+      success: true,
+      message: `${data.length} scores submitted successfully`,
+      data,
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Get student final grades
+app.get("/getStudentGrades/:studentId/:courseId/", async (req, res) => {
+  try {
+    const { studentId, courseId } = req.params;
+
+    const { data, error } = await supabase.supabase
+      .from("ds_student_final_grades")
+      .select("*")
+      .eq("student_id", studentId)
+      .eq("course_id", courseId)
+      .single();
+
+    if (error && error.code !== "PGRST116") {
+      // PGRST116 = no rows found
+      console.error("Error fetching student grades:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data: data || null });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Get yearly progress for student
+app.get(
+  "/getYearlyProgress/:studentId/:courseId/:academicYear",
+  async (req, res) => {
+    try {
+      const { studentId, courseId, academicYear } = req.params;
+
+      // Get yearly requirement
+      const { data: requirement } = await supabase.supabase
+        .from("ds_yearly_requirements")
+        .select("total_points_to_pass")
+        .eq("course_id", courseId)
+        .eq("academic_year", academicYear)
+        .single();
+
+      // Get student's yearly totals
+      const { data: yearlyGrades } = await supabase.supabase
+        .from("ds_student_final_grades")
+        .select("total_raw_points, yearly_total_points, is_passing_year")
+        .eq("student_id", studentId)
+        .eq("course_id", courseId)
+        .eq("academic_year", academicYear);
+
+      let totalPoints = 0;
+      let isPassingYear = false;
+
+      if (yearlyGrades && yearlyGrades.length > 0) {
+        totalPoints = yearlyGrades.reduce(
+          (sum, grade) => sum + (grade.total_raw_points || 0),
+          0
+        );
+        isPassingYear = yearlyGrades.some((grade) => grade.is_passing_year);
+      }
+
+      res.json({
+        success: true,
+        data: {
+          academic_year: academicYear,
+          total_points_earned: totalPoints,
+          points_required: requirement?.total_points_to_pass || 0,
+          is_passing: isPassingYear,
+          quarters: yearlyGrades || [],
+        },
+      });
+    } catch (err) {
+      console.error("Unexpected error:", err);
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  }
+);
+
+// Get class average for assignment
+app.get("/getClassAverage/:courseId/:quarterId/:itemId", async (req, res) => {
+  try {
+    const { courseId, quarterId, itemId } = req.params;
+
+    const { data, error } = await supabase.supabase
+      .from("ds_student_scores")
+      .select("points_earned, points_possible")
+      .eq("course_id", courseId)
+      .eq("quarter_id", quarterId)
+      .eq("item_id", itemId);
+
+    if (error) {
+      console.error("Error fetching class average:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    if (!data || data.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          average_percentage: 0,
+          total_students: 0,
+          scores_entered: 0,
+        },
+      });
+    }
+
+    const scores = data.map(
+      (score) => (score.points_earned / score.points_possible) * 100
+    );
+    const average =
+      scores.reduce((sum, score) => sum + score, 0) / scores.length;
+
+    res.json({
+      success: true,
+      data: {
+        average_percentage: Math.round(average * 100) / 100,
+        total_students: data.length,
+        scores_entered: data.filter((score) => score.points_earned > 0).length,
+      },
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Recalculate student grade manually
+app.post("/recalculateGrade", async (req, res) => {
+  try {
+    const { student_id, course_id, quarter_id } = req.body;
+
+    if (!student_id || !course_id || !quarter_id) {
+      return res.status(400).json({
+        success: false,
+        error: "Student ID, course ID, and quarter ID are required",
+      });
+    }
+
+    // Call the calculation function
+    const { error } = await supabase.supabase.rpc("calculate_student_grade", {
+      p_student_id: student_id,
+      p_course_id: course_id,
+      p_quarter_id: quarter_id,
+    });
+
+    if (error) {
+      console.error("Error recalculating grade:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({
+      success: true,
+      message: "Grade recalculated successfully",
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Delete assessment item
+app.delete("/deleteAssessmentItem/:itemId", async (req, res) => {
+  try {
+    const { itemId } = req.params;
+
+    if (!itemId) {
+      return res.status(400).json({
+        success: false,
+        error: "Item ID is required",
+      });
+    }
+
+    // Check if there are any scores for this item
+    const { data: existingScores } = await supabase.supabase
+      .from("ds_student_scores")
+      .select("score_id")
+      .eq("item_id", itemId)
+      .limit(1);
+
+    if (existingScores && existingScores.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Cannot delete assessment item that has student scores. Please deactivate instead.",
+      });
+    }
+
+    const { error } = await supabase.supabase
+      .from("ds_assessment_items")
+      .delete()
+      .eq("item_id", itemId);
+
+    if (error) {
+      console.error("Error deleting assessment item:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({
+      success: true,
+      message: "Assessment item deleted successfully",
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Update assessment item
+app.put("/updateAssessmentItem/:itemId", async (req, res) => {
+  try {
+    const { itemId } = req.params;
+    const updates = req.body;
+
+    if (!itemId) {
+      return res.status(400).json({
+        success: false,
+        error: "Item ID is required",
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_assessment_items")
+      .update({
+        ...updates,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("item_id", itemId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error updating assessment item:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({
+      success: true,
+      message: "Assessment item updated successfully",
+      data,
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
