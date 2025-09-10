@@ -1189,34 +1189,18 @@ app.get("/getCalendarByCourse/:course_id", async (req, res) => {
 });
 app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
   const { course_id } = req.params;
-
   try {
-    // Calculate current week dates (Monday to Friday)
-    const today = new Date();
-    const currentDayOfWeek = today.getDay();
-    const daysToMonday = currentDayOfWeek === 0 ? -6 : -(currentDayOfWeek - 1);
-
-    const startOfWeek = new Date(today);
-    startOfWeek.setDate(today.getDate() + daysToMonday);
-
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 4); // Friday
-
-    const week_start = startOfWeek.toISOString().split("T")[0];
-    const week_end = endOfWeek.toISOString().split("T")[0];
-
-    console.log(
-      `Fetching current week calendar for course ${course_id}: ${week_start} to ${week_end}`
+    const { data, error } = await supabase.supabase.rpc(
+      "get_current_week_calendar_by_course",
+      {
+        p_course_id: course_id,
+      }
+    );
+    const uniqueData = Array.from(
+      new Map(data.map((item) => [item.content_id, item])).values()
     );
 
-    let { data, error } = await supabase.supabase
-      .from("ds_calendar_week")
-      .select("*")
-      .contains("courses_id", [course_id])
-      .gte("calendar_day", week_start)
-      .lte("calendar_day", week_end)
-      .order("calendar_day", { ascending: true });
-
+    console.log(uniqueData);
     if (error) {
       console.error("Database error:", error);
       return res.status(500).json({
@@ -1225,15 +1209,7 @@ app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
       });
     }
 
-    res.json({
-      success: true,
-      data: data,
-      count: data.length,
-      current_week: {
-        start: week_start,
-        end: week_end,
-      },
-    });
+    res.send(uniqueData);
   } catch (err) {
     console.error("Server error:", err);
     res.status(500).json({

@@ -602,8 +602,10 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
       .from("profiles")
       .select("email")
       .eq("id", userId)
+      .limit(1)
       .single();
-
+    console.log(authProfile);
+    console.log(authError);
     if (authError || !authProfile) {
       console.error("Auth profile fetch error:", authError);
       return res.status(404).json({
