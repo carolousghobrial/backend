@@ -12,13 +12,15 @@ app.get("/", (req, res) => {
 
 app.post("/addUserRole", async (req, res) => {
   const UserServiceRole = {
-    user_id: req.body.user_id,
+    portal_id: req.body.portal_id,
     role_id: req.body.role_id,
     service_id: req.body.service_id,
   };
+  console.log(UserServiceRole);
   const { data, error } = await supabase.supabase
     .from("user_service_roles")
-    .insert([UserServiceRole]);
+    .insert([UserServiceRole])
+    .single();
 
   if (error) {
     res.status(500).send(error.message);
@@ -194,11 +196,9 @@ app.get("/getServiceById/:id", async (req, res) => {
   }
 });
 app.get("/getDeaconsSchoolClasses", async (req, res) => {
-  const serviceId = req.params.id;
   const { data, error } = await supabase.supabase
-    .from("services_table")
-    .select("*")
-    .ilike("service_id", "%ds_%"); // %keyword% means contains keyword
+    .from("ds_courses")
+    .select("*");
 
   if (error) {
     res.status(500).send(error.message);

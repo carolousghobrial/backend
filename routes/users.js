@@ -228,6 +228,7 @@ app.post("/register", async (req, res) => {
       family_id,
       family_role,
     };
+    console.log(newUser);
 
     console.log("Registering new user:", email);
 
@@ -278,7 +279,7 @@ app.post("/register", async (req, res) => {
           user: existingUser,
         });
       }
-
+      console.log(authError);
       return res.status(400).json({
         success: false,
         message: authError.message,
@@ -588,25 +589,61 @@ app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
 /**
  * Get logged in user info
  */
+/**
+ * Get logged in user info
+ */
 app.get("/getLoggedIn", authenticateToken, async (req, res) => {
   try {
-    // Get user profile from database
-    const { data: profile, error: profileError } = await supabase.supabase
+    // User is already verified by authenticateToken middleware
+    const userId = req.user.id;
+
+    // First get the authenticated user's email
+    const { data: authProfile, error: authError } = await supabase.supabase
       .from("profiles")
-      .select("*")
-      .eq("id", req.user.id)
+      .select("email")
+      .eq("id", userId)
       .single();
 
-    const userData = profile || {
-      id: req.user.id,
-      email: req.user.email,
-      ...req.user.user_metadata,
-    };
+    if (authError || !authProfile) {
+      console.error("Auth profile fetch error:", authError);
+      return res.status(404).json({
+        success: false,
+        message: "User profile not found",
+      });
+    }
 
+    // Get all profiles with the same email (multiple church profiles)
+    const { data: profiles, error: profileError } = await supabase.supabase
+      .from("profiles")
+      .select("*")
+      .eq("email", authProfile.email)
+      .order("portal_id", { ascending: true });
+
+    if (profileError) {
+      console.error("Profiles fetch error:", profileError);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch user profiles",
+      });
+    }
+
+    if (!profiles || profiles.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No profiles found",
+      });
+    }
+
+    // Return consistent response format
     res.json({
       success: true,
-      user: userData,
-      authenticated: true,
+      user: profiles[0], // Primary profile
+      users: profiles, // All profiles
+      data: {
+        user: profiles[0],
+        users: profiles,
+        count: profiles.length,
+      },
     });
   } catch (error) {
     console.error("Get logged in user error:", error);
@@ -670,6 +707,67 @@ app.get("/getUsers", async (req, res) => {
     });
   }
 });
+app.get("/addProfilesToUserService", async (req, res) => {
+  try {
+    // 1. Get all profiles
+    const { data: profiles, error } = await supabase.supabase
+      .from("profiles")
+      .select("*")
+      .order("portal_id", { ascending: false });
+
+    if (error) {
+      console.error("Get users error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    // 2. Insert each profile into user_service_roles
+    for (const profile of profiles) {
+      if (profile.email == "fr.serapion@gmail.com") {
+        const { error: insertError } = await supabase.supabase
+          .from("user_service_roles") // 👈 change this to your target table
+          .insert({
+            portal_id: profile.portal_id, // 👈 adjust column names as needed
+            role_id: "priest", // example static role
+            service_id: "congregation", // example static service
+          });
+        if (insertError) {
+          console.error(
+            `Insert error for user ${profile.portal_id}:`,
+            insertError.message
+          );
+        }
+      } else {
+        const { error: insertError } = await supabase.supabase
+          .from("user_service_roles") // 👈 change this to your target table
+          .insert({
+            portal_id: profile.portal_id, // 👈 adjust column names as needed
+            role_id: "member", // example static role
+            service_id: "congregation", // example static service
+          });
+        if (insertError) {
+          console.error(
+            `Insert error for user ${profile.portal_id}:`,
+            insertError.message
+          );
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: "Profiles inserted into user_service_roles",
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+});
 
 /**
  * Get user by ID
@@ -689,8 +787,8 @@ app.get("/getUserById/:id", authenticateToken, async (req, res) => {
 
     // Try the RPC function first
     const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
-      "getuserwithrolesandservices",
-      { user_uuid: id }
+      "get_user_roles_and_services",
+      { p_user_id: id }
     );
 
     if (!rpcError && rpcData && rpcData.length > 0) {
@@ -879,39 +977,35 @@ app.post("/createUser", async (req, res) => {
 /**
  * Get user roles and services
  */
-app.get(
-  "/getRolesAndServiceOfUser/:userId",
-  authenticateToken,
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-
-      const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
-        "getuserwithrolesandservices",
-        { p_user_id: userId }
-      );
-
-      if (rpcError) {
-        console.error("Get user roles error:", rpcError);
-        return res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
-
-      res.json({
-        success: true,
-        data: rpcData || [],
-      });
-    } catch (error) {
-      console.error("Get user roles error:", error);
-      res.status(500).json({
+app.get("/getRolesAndServiceOfUser/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    console.log(userId);
+    const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
+      "get_user_roles_and_services",
+      { p_user_id: userId }
+    );
+    console.log(rpcData);
+    if (rpcError) {
+      console.error("Get user roles error:", rpcError);
+      return res.status(500).json({
         success: false,
-        message: "Failed to fetch user roles",
+        message: error.message,
       });
     }
+
+    res.json({
+      success: true,
+      data: rpcData || [],
+    });
+  } catch (error) {
+    console.error("Get user roles error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch user roles",
+    });
   }
-);
+});
 
 /**
  * Get family users for head
@@ -1000,7 +1094,7 @@ app.delete("/deleteUser/:uid", authenticateToken, async (req, res) => {
 /**
  * Register without email verification (admin function)
  */
-app.post("/registerwithoutemail", authenticateToken, async (req, res) => {
+app.post("/registerwithoutemail", async (req, res) => {
   try {
     const {
       email,
@@ -1012,13 +1106,12 @@ app.post("/registerwithoutemail", authenticateToken, async (req, res) => {
       family_id,
       family_role,
     } = req.body;
-
+    console.log(email);
     // Check if user already exists
     const { data: existingProfile, error: checkError } = await supabase.supabase
       .from("profiles")
       .select("*")
-      .eq("email", email)
-      .single();
+      .eq("email", email);
 
     if (checkError && checkError.code !== "PGRST116") {
       // PGRST116 means no rows found
@@ -1028,16 +1121,9 @@ app.post("/registerwithoutemail", authenticateToken, async (req, res) => {
         message: "Error checking existing user",
       });
     }
-
-    if (existingProfile) {
-      return res.status(409).json({
-        success: false,
-        message: "User with this email already exists",
-        user: existingProfile,
-      });
-    }
-
+    console.log(existingProfile);
     const newUser = {
+      id: existingProfile[0].id,
       first_name,
       last_name,
       dob: dob ? new Date(dob) : null,
@@ -1046,7 +1132,6 @@ app.post("/registerwithoutemail", authenticateToken, async (req, res) => {
       portal_id,
       family_id,
       family_role,
-      created_at: new Date().toISOString(),
     };
 
     const { data, error } = await supabase.supabase

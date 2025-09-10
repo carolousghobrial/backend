@@ -238,7 +238,7 @@ app.get("/getMemorization/:id", async (req, res) => {
   console.log(data);
   res.send(data);
 });
-app.get("/getdeaconsschoolextrasbylevel/:course_id", async (req, res) => {
+app.get("/getdeaconsschoolextrasbycourse/:course_id", async (req, res) => {
   const course_id = req.params.course_id;
 
   try {
@@ -1062,6 +1062,75 @@ app.post("/enrollStudent", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+app.post("/unenrollStudent", async (req, res) => {
+  try {
+    const { student_id, course_id } = req.body;
+
+    // Validate input
+    if (!student_id || !course_id) {
+      return res.status(400).json({
+        error: "Both student_id and course_id are required",
+      });
+    }
+
+    // Check enrollment
+    const { data: existing, error: checkError } = await supabase
+      .from("ds_student_enrollment")
+      .select("id")
+      .eq("student_id", student_id)
+      .eq("course_id", course_id)
+      .maybeSingle(); // returns null if none found
+
+    if (checkError) {
+      console.error("Error checking enrollment:", checkError);
+      return res.status(500).json({ error: checkError.message });
+    }
+
+    if (!existing) {
+      return res.status(404).json({
+        error: "Student is not enrolled in this course",
+      });
+    }
+
+    // Mark enrollment inactive
+    const { data, error } = await supabase
+      .from("ds_student_enrollment")
+      .update({
+        is_active: false,
+        unenrolled_date: new Date().toISOString().split("T")[0],
+      })
+      .eq("student_id", student_id)
+      .eq("course_id", course_id)
+      .select();
+
+    if (error) {
+      console.error("Supabase unenrollStudent error:", error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.json({
+      message: "Student unenrolled successfully",
+      data,
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/getEnrolledDSStudents/:course_id", async (req, res) => {
+  // Check if student is already enrolled in this course
+  const { course_id } = req.params;
+  const { data: data, error: error } = await supabase.supabase
+    .from("ds_student_enrollment")
+    .select("*")
+    .eq("course_id", course_id);
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
 
 app.put("/updateAllLevels", async (req, res) => {
   const levelMap = {
@@ -1116,6 +1185,61 @@ app.get("/getCalendarByCourse/:course_id", async (req, res) => {
     res.status(500).send(error.message);
   } else {
     res.send(data);
+  }
+});
+app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
+  const { course_id } = req.params;
+
+  try {
+    // Calculate current week dates (Monday to Friday)
+    const today = new Date();
+    const currentDayOfWeek = today.getDay();
+    const daysToMonday = currentDayOfWeek === 0 ? -6 : -(currentDayOfWeek - 1);
+
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() + daysToMonday);
+
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 4); // Friday
+
+    const week_start = startOfWeek.toISOString().split("T")[0];
+    const week_end = endOfWeek.toISOString().split("T")[0];
+
+    console.log(
+      `Fetching current week calendar for course ${course_id}: ${week_start} to ${week_end}`
+    );
+
+    let { data, error } = await supabase.supabase
+      .from("ds_calendar_week")
+      .select("*")
+      .contains("courses_id", [course_id])
+      .gte("calendar_day", week_start)
+      .lte("calendar_day", week_end)
+      .order("calendar_day", { ascending: true });
+
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({
+        error: "Database query failed",
+        details: error.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: data,
+      count: data.length,
+      current_week: {
+        start: week_start,
+        end: week_end,
+      },
+    });
+  } catch (err) {
+    console.error("Server error:", err);
+    res.status(500).json({
+      error: "Internal server error",
+      details: err.message,
+    });
   }
 });
 
