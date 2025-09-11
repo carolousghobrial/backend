@@ -44,5 +44,26 @@ app.delete("/deletediptych/:id", async (req, res) => {
   } else {
   }
 });
+app.post("/deleteDiptychs", async (req, res) => {
+  try {
+    console.log("here");
+    const { ids } = req.body; // array of IDs
+    if (!Array.isArray(ids)) {
+      return res.status(400).json({ error: "ids must be an array" });
+    }
+    console.log(ids);
+    // Example with Supabase
+    const { data, error } = await supabase.supabase
+      .from("diptych")
+      .delete()
+      .in("id", ids);
+    console.log(error);
+    if (error) throw error;
 
+    res.json({ success: true, deleted: data });
+  } catch (err) {
+    console.error("Delete error:", err);
+    res.status(500).json({ error: "Failed to delete requests" });
+  }
+});
 module.exports = app;

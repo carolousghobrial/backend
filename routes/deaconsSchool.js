@@ -327,7 +327,7 @@ app.post("/addDSTeacher", async (req, res) => {
       console.error("Error checking existing assignment:", checkError);
       return res.status(500).json({ error: checkError.message });
     }
-
+    console.log(existing);
     if (existing && existing.length > 0) {
       // Teacher already assigned, update their role and make active
       const { data, error } = await supabase.supabase

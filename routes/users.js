@@ -831,15 +831,21 @@ app.get("/getUserById/:id", authenticateToken, async (req, res) => {
 /**
  * Get user by portal ID
  */
-app.get("/getUserByPortal/:portal_id", authenticateToken, async (req, res) => {
+app.get("/getUserByPortal/:portal_id", async (req, res) => {
   try {
     const { portal_id } = req.params;
+
+    // Keep as string since database column is text
+    const cleanPortalId = String(portal_id).trim();
 
     const { data: profile, error } = await supabase.supabase
       .from("profiles")
       .select("*")
-      .eq("portal_id", portal_id)
+      .eq("portal_id", cleanPortalId) // Remove parseInt() - keep as string
       .single();
+
+    console.log("Searching for portal_id:", cleanPortalId);
+    console.log("Found profile:", profile);
 
     if (error) {
       console.error("Get user by portal ID error:", error);
@@ -861,7 +867,6 @@ app.get("/getUserByPortal/:portal_id", authenticateToken, async (req, res) => {
     });
   }
 });
-
 /**
  * Update user
  */
@@ -1165,7 +1170,16 @@ app.post("/registerwithoutemail", async (req, res) => {
 });
 
 // ==================== UTILITY ROUTES ====================
-
+app.get("/getUserByPortalId/:portal_id", async (req, res) => {
+  const { portal_id } = req.params;
+  const { data: profile, error: checkError } = await supabase.supabase
+    .from("profiles")
+    .select("*")
+    .eq("portal_id", portal_id)
+    .single();
+  console.log(profile);
+  res.send(profile);
+});
 /**
  * Get current user by token (alternative endpoint)
  */
