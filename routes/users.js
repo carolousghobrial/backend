@@ -604,8 +604,7 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
       .eq("id", userId)
       .limit(1)
       .single();
-    console.log(authProfile);
-    console.log(authError);
+
     if (authError || !authProfile) {
       console.error("Auth profile fetch error:", authError);
       return res.status(404).json({
@@ -635,16 +634,56 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
         message: "No profiles found",
       });
     }
+    // Fetch profile images for each student
+    console.log(profiles);
+    const profilesWithImages = await Promise.all(
+      profiles.map(async (profile) => {
+        let profileImageUrl = null;
 
+        try {
+          // Using built-in fetch (Node.js 18+)
+          const imageResponse = await fetch(
+            `https://api.suscopts.org/image/${profile.portal_id}`
+          );
+
+          if (imageResponse.ok) {
+            // Convert to base64 or get the blob URL
+            const imageBuffer = await imageResponse.arrayBuffer();
+            const base64Image = Buffer.from(imageBuffer).toString("base64");
+            profileImageUrl = `data:${imageResponse.headers.get(
+              "content-type"
+            )};base64,${base64Image}`;
+          }
+        } catch (imageError) {
+          console.warn(
+            `Failed to fetch image for portal_id ${profile.portal_id}:`,
+            imageError.message
+          );
+          // Continue without image - don't fail the entire request
+        }
+        return {
+          id: profile.id,
+          portal_id: profile.portal_id,
+          first_name: profile.first_name || "",
+          last_name: profile.last_name || "",
+          email: profile.email,
+          cellphone: profile.cellphone,
+          family_id: profile.family_id,
+          family_role: profile.family_role,
+          profile_pic: profileImageUrl,
+        };
+      })
+    );
     // Return consistent response format
+
     res.json({
       success: true,
-      user: profiles[0], // Primary profile
-      users: profiles, // All profiles
+      user: profilesWithImages[0], // Primary profile
+      users: profilesWithImages, // All profiles
       data: {
-        user: profiles[0],
-        users: profiles,
-        count: profiles.length,
+        user: profilesWithImages[0],
+        users: profilesWithImages,
+        count: profilesWithImages.length,
       },
     });
   } catch (error) {
