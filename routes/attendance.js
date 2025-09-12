@@ -264,48 +264,53 @@ app.post("/submitattendancereport", authenticateToken, async (req, res) => {
 /**
  * Get attendance records for a specific date using PostgreSQL function
  */
-app.get("/getAttendanceByDate/:date", authenticateToken, async (req, res) => {
-  try {
-    const { date } = req.params;
+app.get(
+  "/getAttendanceByDate/:date/:service_id",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { date, service_id } = req.params;
 
-    // Validate date format
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(date)) {
-      return res.status(400).json({
-        success: false,
-        message: "Date must be in YYYY-MM-DD format",
-      });
-    }
-
-    console.log("Getting attendance for date:", date);
-
-    // Use the PostgreSQL function instead of direct query
-    const { data, error } = await supabase.supabase.rpc(
-      "get_attendance_by_date",
-      {
-        p_date: date,
+      // Validate date format
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(date)) {
+        return res.status(400).json({
+          success: false,
+          message: "Date must be in YYYY-MM-DD format",
+        });
       }
-    );
 
-    if (error) {
-      console.error("Error getting attendance:", error);
-      return res.status(500).json({
+      console.log("Getting attendance for date:", date);
+
+      // Use the PostgreSQL function instead of direct query
+      const { data, error } = await supabase.supabase.rpc(
+        "get_attendance_by_date_and_service",
+        {
+          p_date: date,
+          p_service_id: service_id,
+        }
+      );
+
+      if (error) {
+        console.error("Error getting attendance:", error);
+        return res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
+
+      console.log("Attendance data with profiles:", data);
+
+      res.send(data);
+    } catch (error) {
+      console.error("Get attendance error:", error);
+      res.status(500).json({
         success: false,
-        message: error.message,
+        message: "Failed to get attendance records",
       });
     }
-
-    console.log("Attendance data with profiles:", data);
-
-    res.send(data);
-  } catch (error) {
-    console.error("Get attendance error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to get attendance records",
-    });
   }
-});
+);
 
 /**
  * Get attendance records for a date range

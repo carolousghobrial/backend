@@ -709,6 +709,27 @@ app.get("/getUsers", async (req, res) => {
     });
   }
 });
+app.get("/getUserEmails", async (req, res) => {
+  try {
+    const { data, error } = await supabase.rpc("get_all_user_emails");
+    console.log(error);
+    if (error) {
+      console.error("Get users error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    res.send(data);
+  } catch (error) {
+    console.error("Get users error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch users",
+    });
+  }
+});
 app.get("/addProfilesToUserService", async (req, res) => {
   try {
     // 1. Get all profiles

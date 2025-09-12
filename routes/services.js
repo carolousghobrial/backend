@@ -274,11 +274,10 @@ app.get("/getServiceServants/:service_id", async (req, res) => {
 app.get("/getServiceMembers/:service_id", async (req, res) => {
   const service_id = req.params.service_id;
 
-  let { data: myData, error } = await supabase.supabase
-    .from("user_service_roles")
-    .select("*")
-    .eq("service_id", service_id)
-    .eq("role_id", "congregant");
+  let { data: myData, error } = await supabase.supabase.rpc(
+    "get_service_members_teachers_coordinators",
+    { p_service_id: service_id }
+  );
 
   if (error) {
     console.log(error);
