@@ -300,6 +300,7 @@ app.post("/register", async (req, res) => {
     });
   }
 });
+
 /**
  * Verify password reset token endpoint
  */
@@ -750,7 +751,7 @@ app.get("/getUsers", async (req, res) => {
 });
 app.get("/getUserEmails", async (req, res) => {
   try {
-    const { data, error } = await supabase.rpc("get_all_user_emails");
+    const { data, error } = await supabase.supabase.rpc("get_all_user_emails");
     console.log(error);
     if (error) {
       console.error("Get users error:", error);
@@ -760,7 +761,9 @@ app.get("/getUserEmails", async (req, res) => {
       });
     }
 
-    res.send(data);
+    // Extract just the email strings from the array of objects
+    const emailStrings = data.map((item) => item.email);
+    res.send(emailStrings);
   } catch (error) {
     console.error("Get users error:", error);
     res.status(500).json({
