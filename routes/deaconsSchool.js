@@ -72,7 +72,7 @@ app.get("/getCopticByLevel/:level", async (req, res) => {
   const level = req.params.level;
   console.log(level);
   let { data: data, error } = await supabase.supabase
-    .from("deacons_school_rituals")
+    .from("deacons_school_coptic")
     .select("*")
     .eq("level", level);
 
@@ -1577,6 +1577,35 @@ app.get("/getStudentScores/:studentId/:courseId", async (req, res) => {
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
+// Get student scores
+app.get("/getStudentsScoresByCourse/:courseId", async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    const { data, error } = await supabase.supabase.rpc(
+      "get_all_students_scores_by_course",
+      {
+        p_course_id: courseId,
+      }
+    );
+    console.log(data);
+    if (error) {
+      console.error("Error fetching scores:", error);
+    } else {
+      console.log("All Scores (including attendance & behavior):", data);
+    }
+
+    if (error) {
+      console.error("Error fetching student scores:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
 
 // Submit student score
 app.post("/submitStudentScore", async (req, res) => {
@@ -1717,7 +1746,6 @@ app.get("/getStudentGrades/:studentId/:courseId/", async (req, res) => {
       .eq("student_id", studentId)
       .eq("course_id", courseId)
       .single();
-
     if (error && error.code !== "PGRST116") {
       // PGRST116 = no rows found
       console.error("Error fetching student grades:", error);
@@ -1725,6 +1753,28 @@ app.get("/getStudentGrades/:studentId/:courseId/", async (req, res) => {
     }
 
     res.json({ success: true, data: data || null });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+// Get student final grades
+app.get("/getStudentsGradesByCourse/:courseId/", async (req, res) => {
+  try {
+    const { courseId } = req.params; // Only extract courseId
+    console.log(courseId);
+    const { data, error } = await supabase.supabase.rpc(
+      "get_course_students_grades",
+      {
+        p_course_id: courseId,
+      }
+    );
+
+    if (error) {
+      console.error("Error fetching student grades:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    res.json({ success: true, data: data || [] }); // Return empty array if no data
   } catch (err) {
     console.error("Unexpected error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
