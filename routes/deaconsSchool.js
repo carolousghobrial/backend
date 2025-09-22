@@ -710,6 +710,84 @@ app.get("/getAttendanceBySession/:sessionId", async (req, res) => {
     });
   }
 });
+app.get("/getAttendanceRecordByCourse/:course_id", async (req, res) => {
+  try {
+    const { course_id } = req.params;
+
+    if (!course_id) {
+      return res.status(400).json({
+        success: false,
+        error: "course_id ID is required",
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_attendance")
+      .select(
+        `
+        *,
+        users:student_id (
+          id,
+          first_name,
+          last_name,
+          email
+        ),
+        ds_class_sessions:session_id (
+          session_id,
+          course_id,
+          session_date,
+          topic
+        )
+      `
+      )
+      .eq("course_id", course_id)
+      .order("users(first_name)", { ascending: true });
+    console.log(data);
+    if (error) {
+      console.error("Error fetching attendance records:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    // Transform data to match AttendanceRecord class
+    const attendanceRecords = data.map((record) => ({
+      student_id: record.student_id,
+      session_id: record.session_id,
+      present: record.present,
+      good_behavior: record.good_behavior,
+      notes: record.notes,
+      recorded_by: record.recorded_by,
+      recorded_at: record.recorded_at,
+      updated_at: record.updated_at,
+      student: record.users
+        ? {
+            id: record.users.id,
+            first_name: record.users.first_name,
+            last_name: record.users.last_name,
+            email: record.users.email,
+          }
+        : null,
+      session: record.ds_class_sessions
+        ? {
+            session_id: record.ds_class_sessions.session_id,
+            course_id: record.ds_class_sessions.course_id,
+            session_date: record.ds_class_sessions.session_date,
+            topic: record.ds_class_sessions.topic,
+          }
+        : null,
+    }));
+
+    res.send(attendanceRecords);
+  } catch (error) {
+    console.error("Get attendance by session error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
 /**
  * Create new attendance session with records
  * POST /createAttendance
