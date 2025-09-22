@@ -447,7 +447,7 @@ app.post("/resetPassword", async (req, res) => {
 // app.get("/verify-reset-token/:token", ...)
 
 // Update your forgot password to ensure proper redirect URL
-app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
+app.post("/forgotPassword", async (req, res) => {
   try {
     console.log("=== Forgot Password Request ===");
     const { email } = req.body;
