@@ -1,7 +1,6 @@
 const { Expo } = require("expo-server-sdk");
 const express = require("express");
 const bodyParser = require("body-parser");
-const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const cors = require("cors");
 const { body, param, validationResult } = require("express-validator");
@@ -25,21 +24,6 @@ app.use(
     credentials: true,
   })
 );
-
-// Rate limiting
-const notificationLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 notification requests per windowMs
-  message: { error: "Too many notification requests, please try again later." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const registrationLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 50, // Limit token registrations
-  message: { error: "Too many registration attempts, please try again later." },
-});
 
 // Body parsing middleware
 app.use(bodyParser.json({ limit: "10mb" }));
@@ -238,7 +222,6 @@ app.post(
         channelId: "default",
       }));
 
-      // Send in chunks to avoid rate limits
       const chunks = expo.chunkPushNotifications(notifications);
       const results = [];
 
