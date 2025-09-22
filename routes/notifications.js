@@ -1,8 +1,6 @@
 const { Expo } = require("expo-server-sdk");
 const express = require("express");
 const bodyParser = require("body-parser");
-const helmet = require("helmet");
-const cors = require("cors");
 const { body, param, validationResult } = require("express-validator");
 
 const app = express();
@@ -13,17 +11,6 @@ const expo = new Expo({
 });
 
 const supabase = require("../config/config");
-
-// Security middleware
-app.use(helmet());
-app.use(
-  cors({
-    origin: process.env.ALLOWED_ORIGINS?.split(",") || [
-      "http://localhost:3000",
-    ],
-    credentials: true,
-  })
-);
 
 // Body parsing middleware
 app.use(bodyParser.json({ limit: "10mb" }));
@@ -136,7 +123,7 @@ const createOrUpdateUserToken = async (tokenData) => {
 // Register/Update push token
 app.post(
   "/registerToken",
-  registrationLimiter,
+
   [
     body("token").notEmpty().withMessage("Token is required"),
     body("userId").notEmpty().withMessage("User ID is required"),
@@ -182,7 +169,6 @@ app.post(
 // Send general push notifications
 app.post(
   "/sendPushNotification",
-  notificationLimiter,
   [
     body("title").notEmpty().withMessage("Title is required"),
     body("body").notEmpty().withMessage("Body is required"),
@@ -262,7 +248,6 @@ app.post(
 // Send service-specific notifications
 app.post(
   "/sendSubscribedServicePushNotification/:service_id",
-  notificationLimiter,
   [
     param("service_id").notEmpty().withMessage("Service ID is required"),
     body("title").notEmpty().withMessage("Title is required"),
@@ -348,7 +333,6 @@ app.post(
 // Update token notification preferences
 app.post(
   "/updateTokenStatus",
-  registrationLimiter,
   [
     body("tokenId").notEmpty().withMessage("Token ID is required"),
     body("generalNotificationsAllowed")
@@ -393,7 +377,6 @@ app.post(
 // Update service subscriptions
 app.post(
   "/updateNotificationServices",
-  registrationLimiter,
   [
     body("service_id").notEmpty().withMessage("Service ID is required"),
     body("token").notEmpty().withMessage("Token is required"),

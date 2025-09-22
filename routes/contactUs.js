@@ -1,7 +1,7 @@
 const express = require("express");
 const bp = require("body-parser");
 const app = express();
-const firebase = require("../config/config");
+const supabase = require("../config/config");
 app.use(bp.json());
 app.use(bp.urlencoded({ extended: true }));
 
