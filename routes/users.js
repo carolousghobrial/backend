@@ -76,7 +76,7 @@ const rateLimitPasswordReset = (req, res, next) => {
   const email = req.body.email;
   const now = Date.now();
   const windowMs = 15 * 60 * 1000; // 15 minutes
-  const maxAttempts = 3;
+  const maxAttempts = 100;
 
   if (!email) {
     return next();
@@ -302,29 +302,30 @@ app.post("/register", async (req, res) => {
 });
 
 /**
- * Verify password reset token endpoint
+ * Verify reset token endpoint - optional helper to validate tokens
  */
-app.post("/verifyResetToken/:token", async (req, res) => {
+/**
+ * Verify password reset token endpoint (Fixed version)
+ */
+app.post("/verifyResetToken", async (req, res) => {
   try {
-    const { token } = req.params;
+    const { token } = req.body;
+
     if (!token) {
       return res.status(400).json({
         success: false,
         message: "Reset token is required",
       });
     }
-    console.log(token);
 
     console.log("Verifying reset token:", token);
 
-    // Verify the token with Supabase
+    // For Supabase, we need to verify the session token directly
     const {
       data: { user },
       error,
-    } = await supabase.supabase.auth.verifyOtp({
-      type: "recovery",
-      token_hash: token, // token from your reset link
-    });
+    } = await supabase.supabase.auth.getUser(token);
+
     if (error || !user) {
       console.error("Token verification error:", error);
       return res.status(400).json({
@@ -361,7 +362,7 @@ app.post("/verifyResetToken/:token", async (req, res) => {
 });
 
 /**
- * Password reset endpoint - handles Supabase password reset tokens
+ * Password reset endpoint - Fixed for Supabase
  */
 app.post("/resetPassword", async (req, res) => {
   try {
@@ -381,9 +382,34 @@ app.post("/resetPassword", async (req, res) => {
       });
     }
 
+    console.log("Attempting password reset with token");
+
+    // Create a temporary Supabase client with the recovery token
+    const { createClient } = require("@supabase/supabase-js");
+
+    const supabaseClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_ANON_KEY
+    );
+
+    // Set the session with the recovery token
+    const { data: sessionData, error: sessionError } =
+      await supabaseClient.auth.setSession({
+        access_token: token,
+        refresh_token: "", // Not needed for password reset
+      });
+
+    if (sessionError) {
+      console.error("Session error:", sessionError);
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired token",
+      });
+    }
+
     // Now update the password
     const { data: updatedUser, error: updateError } =
-      await supabase.supabase.auth.updateUser({
+      await supabaseClient.auth.updateUser({
         password: new_password,
       });
 
@@ -391,77 +417,26 @@ app.post("/resetPassword", async (req, res) => {
       console.error("Password update error:", updateError.message);
       return res.status(400).json({
         success: false,
-        message: "Failed to update password",
+        message: "Failed to update password: " + updateError.message,
       });
     }
+
+    // Clean up the session
+    await supabaseClient.auth.signOut();
 
     res.json({
       success: true,
       message: "Password reset successfully",
-      user: updatedUser,
+      user: {
+        id: updatedUser.user?.id,
+        email: updatedUser.user?.email,
+      },
     });
   } catch (error) {
     console.error("Reset password error:", error);
     res.status(500).json({
       success: false,
       message: "An error occurred while resetting the password",
-    });
-  }
-});
-
-/**
- * Verify reset token endpoint - optional helper to validate tokens
- */
-app.post("/verifyResetToken", async (req, res) => {
-  try {
-    const { token } = req.body;
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: "Token is required",
-      });
-    }
-
-    // Create temporary client to verify token
-    const supabaseClient = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_ANON_KEY,
-      {
-        auth: {
-          autoRefreshToken: false,
-          persistSession: false,
-        },
-      }
-    );
-
-    // Try to set session with the token
-    const { data, error } = await supabaseClient.auth.setSession({
-      access_token: token,
-      refresh_token: token,
-    });
-
-    if (error) {
-      console.error("Token verification failed:", error.message);
-      return res.status(400).json({
-        success: false,
-        message: "Invalid or expired token",
-      });
-    }
-
-    // Clean up session
-    await supabaseClient.auth.signOut();
-
-    res.json({
-      success: true,
-      message: "Token is valid",
-      email: data.user?.email || "",
-    });
-  } catch (error) {
-    console.error("Token verification error:", error);
-    res.status(500).json({
-      success: false,
-      message: "An error occurred while verifying the token",
     });
   }
 });
@@ -515,6 +490,7 @@ app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
 
     if (!existingUser) {
       console.log("Password reset requested for non-existent email:", email);
+      // Return success anyway for security (don't reveal if email exists)
       return res.json({
         success: true,
         message:
@@ -523,9 +499,10 @@ app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
       });
     }
 
-    // Updated redirect URL to match your email template pattern
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:4200";
-    const redirectUrl = `${frontendUrl}/reset-password`; // Base URL, token will be appended by Supabase
+    // Use production URL - make sure this matches your Supabase redirect URL configuration
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://www.stgeorgecocnashville.org";
+    const redirectUrl = `${frontendUrl}/reset-password`; // This will be the base redirect URL
 
     console.log("Sending password reset email with redirect to:", redirectUrl);
 
@@ -567,8 +544,6 @@ app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
     }
 
     console.log("Password reset email sent successfully to:", email);
-
-    // Optional: Log the reset request
 
     res.json({
       success: true,
