@@ -368,6 +368,11 @@ app.post("/resetPassword", async (req, res) => {
   try {
     const { token, new_password } = req.body;
 
+    console.log("=== Password Reset Debug ===");
+    console.log("Token received:", token ? "Present" : "Missing");
+    console.log("Token length:", token ? token.length : 0);
+    console.log("Password received:", new_password ? "Present" : "Missing");
+
     if (!token || !new_password) {
       return res.status(400).json({
         success: false,
@@ -382,54 +387,82 @@ app.post("/resetPassword", async (req, res) => {
       });
     }
 
-    console.log("Attempting password reset with token");
+    console.log("Attempting password reset with existing Supabase client...");
 
-    // Create a temporary Supabase client with the recovery token
-    const { createClient } = require("@supabase/supabase-js");
+    // First verify the token is valid by getting the user
+    const {
+      data: { user },
+      error: getUserError,
+    } = await supabase.supabase.auth.getUser(token);
 
-    const supabaseClient = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_ANON_KEY
-    );
-
-    // Set the session with the recovery token
-    const { data: sessionData, error: sessionError } =
-      await supabaseClient.auth.setSession({
-        access_token: token,
-        refresh_token: "", // Not needed for password reset
-      });
-
-    if (sessionError) {
-      console.error("Session error:", sessionError);
+    if (getUserError || !user) {
+      console.error("Token validation failed:", getUserError);
       return res.status(400).json({
         success: false,
         message: "Invalid or expired token",
+        debug: {
+          error: getUserError?.message,
+        },
       });
     }
 
-    // Now update the password
-    const { data: updatedUser, error: updateError } =
-      await supabaseClient.auth.updateUser({
-        password: new_password,
+    console.log("Token valid for user:", user.email);
+
+    // Use the token to make a direct API call to Supabase
+    // This approach works without needing admin permissions or creating new clients
+
+    try {
+      const supabaseUrl =
+        process.env.SUPABASE_URL || "https://oplzcugljytvywvewdkj.supabase.co";
+
+      // Make direct API call to update password
+      const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          apikey:
+            process.env.SUPABASE_ANON_KEY || supabase.supabase.supabaseKey,
+        },
+        body: JSON.stringify({
+          password: new_password,
+        }),
       });
 
-    if (updateError) {
-      console.error("Password update error:", updateError.message);
-      return res.status(400).json({
+      const result = await response.json();
+
+      if (!response.ok) {
+        console.error("Password update error via API:", result);
+        return res.status(400).json({
+          success: false,
+          message: result.message || "Failed to update password",
+          debug: {
+            status: response.status,
+            error: result,
+          },
+        });
+      }
+
+      const updatedUser = result;
+    } catch (fetchError) {
+      console.error("Fetch error:", fetchError);
+      return res.status(500).json({
         success: false,
-        message: "Failed to update password: " + updateError.message,
+        message: "Failed to communicate with authentication service",
+        debug: {
+          error: fetchError.message,
+        },
       });
     }
 
-    // Clean up the session
-    await supabaseClient.auth.signOut();
+    console.log("Password updated successfully for user:", user.email);
 
     res.json({
       success: true,
       message: "Password reset successfully",
       user: {
-        id: updatedUser.user?.id,
-        email: updatedUser.user?.email,
+        id: user.id, // Use the original user data from token verification
+        email: user.email,
       },
     });
   } catch (error) {
@@ -437,6 +470,9 @@ app.post("/resetPassword", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "An error occurred while resetting the password",
+      debug: {
+        error: error.message,
+      },
     });
   }
 });
