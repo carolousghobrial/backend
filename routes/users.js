@@ -302,7 +302,67 @@ app.post("/register", async (req, res) => {
 });
 
 /**
- * Password reset endpoint - handles Supabase password reset tokens
+ * Verify reset token endpoint - optional helper to validate tokens
+ */
+/**
+ * Verify password reset token endpoint (Fixed version)
+ */
+app.post("/verifyResetToken", async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "Reset token is required",
+      });
+    }
+
+    console.log("Verifying reset token:", token);
+
+    // For Supabase, we need to verify the session token directly
+    const {
+      data: { user },
+      error,
+    } = await supabase.supabase.auth.getUser(token);
+
+    if (error || !user) {
+      console.error("Token verification error:", error);
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired reset token",
+      });
+    }
+
+    // Get user profile for additional info
+    const { data: profile, error: profileError } = await supabase.supabase
+      .from("profiles")
+      .select("email, first_name, last_name")
+      .eq("id", user.id)
+      .single();
+
+    const userEmail = profile?.email || user.email;
+
+    res.json({
+      success: true,
+      message: "Reset token is valid",
+      email: userEmail,
+      user: {
+        id: user.id,
+        email: userEmail,
+      },
+    });
+  } catch (error) {
+    console.error("Verify reset token error:", error);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while verifying the reset token",
+    });
+  }
+});
+
+/**
+ * Password reset endpoint - Fixed for Supabase
  */
 app.post("/resetPassword", async (req, res) => {
   try {
@@ -322,9 +382,34 @@ app.post("/resetPassword", async (req, res) => {
       });
     }
 
+    console.log("Attempting password reset with token");
+
+    // Create a temporary Supabase client with the recovery token
+    const { createClient } = require("@supabase/supabase-js");
+
+    const supabaseClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_ANON_KEY
+    );
+
+    // Set the session with the recovery token
+    const { data: sessionData, error: sessionError } =
+      await supabaseClient.auth.setSession({
+        access_token: token,
+        refresh_token: "", // Not needed for password reset
+      });
+
+    if (sessionError) {
+      console.error("Session error:", sessionError);
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired token",
+      });
+    }
+
     // Now update the password
     const { data: updatedUser, error: updateError } =
-      await supabase.supabase.auth.updateUser({
+      await supabaseClient.auth.updateUser({
         password: new_password,
       });
 
@@ -332,14 +417,20 @@ app.post("/resetPassword", async (req, res) => {
       console.error("Password update error:", updateError.message);
       return res.status(400).json({
         success: false,
-        message: "Failed to update password",
+        message: "Failed to update password: " + updateError.message,
       });
     }
+
+    // Clean up the session
+    await supabaseClient.auth.signOut();
 
     res.json({
       success: true,
       message: "Password reset successfully",
-      user: updatedUser,
+      user: {
+        id: updatedUser.user?.id,
+        email: updatedUser.user?.email,
+      },
     });
   } catch (error) {
     console.error("Reset password error:", error);
@@ -349,68 +440,6 @@ app.post("/resetPassword", async (req, res) => {
     });
   }
 });
-
-/**
- * Verify reset token endpoint - optional helper to validate tokens
- */
-app.post("/verifyResetToken", async (req, res) => {
-  try {
-    const { token } = req.body;
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: "Token is required",
-      });
-    }
-
-    // Create temporary client to verify token
-    const supabaseClient = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_ANON_KEY,
-      {
-        auth: {
-          autoRefreshToken: false,
-          persistSession: false,
-        },
-      }
-    );
-
-    // Try to set session with the token
-    const { data, error } = await supabaseClient.auth.setSession({
-      access_token: token,
-      refresh_token: token,
-    });
-
-    if (error) {
-      console.error("Token verification failed:", error.message);
-      return res.status(400).json({
-        success: false,
-        message: "Invalid or expired token",
-      });
-    }
-
-    // Clean up session
-    await supabaseClient.auth.signOut();
-
-    res.json({
-      success: true,
-      message: "Token is valid",
-      email: data.user?.email || "",
-    });
-  } catch (error) {
-    console.error("Token verification error:", error);
-    res.status(500).json({
-      success: false,
-      message: "An error occurred while verifying the token",
-    });
-  }
-});
-
-// Remove the duplicate endpoints at the bottom of your file:
-// Delete these duplicate endpoints:
-// app.post("/reset-password", ...)
-// app.get("/verify-reset-token/:token", ...)
 
 // Update your forgot password to ensure proper redirect URL
 app.post("/forgotPassword", async (req, res) => {
