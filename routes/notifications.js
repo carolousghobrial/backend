@@ -35,11 +35,6 @@ const handleValidationErrors = (req, res, next) => {
   next();
 };
 
-// Utility functions
-const isValidExpoPushToken = (token) => {
-  return Expo.isExpoPushToken(token);
-};
-
 const createSuccessResponse = (data, message = "Success") => ({
   success: true,
   message,
@@ -99,31 +94,9 @@ const getSubscribedServiceNotificationsToken = async (service_id) => {
   }
 };
 
-const createOrUpdateUserToken = async (tokenData) => {
-  try {
-    const { data, error } = await supabase.supabase
-      .from("user_tokens")
-      .upsert(tokenData, {
-        onConflict: "token",
-        ignoreDuplicates: false,
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
-  } catch (error) {
-    console.error("Error creating/updating user token:", error);
-    throw new Error("Failed to save token data");
-  }
-};
-
-// Routes with validation and error handling
-
 // Register/Update push token
 app.post(
   "/registerToken",
-
   [
     body("token").notEmpty().withMessage("Token is required"),
     body("userId").notEmpty().withMessage("User ID is required"),
@@ -134,10 +107,23 @@ app.post(
   handleValidationErrors,
   async (req, res) => {
     try {
+      console.log("=== Token Registration Request ===");
+      console.log("Request body:", JSON.stringify(req.body, null, 2));
+      console.log("Request headers:", JSON.stringify(req.headers, null, 2));
+
       const { token, generalNotificationsAllowed, userId } = req.body;
+
+      // Log the token format for debugging
+      console.log("Received token:", token);
+      console.log(
+        "Token starts with ExponentPushToken:",
+        token?.startsWith?.("ExponentPushToken")
+      );
+      console.log("Token validation result:", isValidExpoPushToken(token));
 
       // Validate Expo push token format
       if (!isValidExpoPushToken(token)) {
+        console.error("Invalid push token format:", token);
         return res
           .status(400)
           .json(createErrorResponse("Invalid push token format"));
@@ -146,25 +132,146 @@ app.post(
       const tokenData = {
         token,
         generalNotificationsAllowed,
-        userId,
+        userId: userId.toString(), // Ensure userId is a string
         updatedAt: new Date().toISOString(),
         deviceInfo: {
-          userAgent: req.get("User-Agent"),
-          ip: req.ip,
+          userAgent: req.get("User-Agent") || "unknown",
+          ip: req.ip || req.connection.remoteAddress || "unknown",
         },
+        // Initialize service_subscribed as empty array if not exists
+        service_subscribed: [],
       };
+
+      console.log("Token data to save:", JSON.stringify(tokenData, null, 2));
 
       const result = await createOrUpdateUserToken(tokenData);
 
+      console.log(
+        "Token registration result:",
+        JSON.stringify(result, null, 2)
+      );
+
       res.json(createSuccessResponse(result, "Token registered successfully"));
     } catch (error) {
-      console.error("Token registration error:", error);
+      console.error("=== Token Registration Error ===");
+      console.error("Error type:", error.constructor.name);
+      console.error("Error message:", error.message);
+      console.error("Error stack:", error.stack);
+
+      // More specific error handling
+      if (error.message?.includes?.("duplicate key")) {
+        return res
+          .status(409)
+          .json(createErrorResponse("Token already exists", error.message));
+      }
+
+      if (error.message?.includes?.("connection")) {
+        return res
+          .status(503)
+          .json(
+            createErrorResponse("Database connection error", error.message)
+          );
+      }
+
+      if (error.message?.includes?.("validation")) {
+        return res
+          .status(400)
+          .json(createErrorResponse("Validation error", error.message));
+      }
+
       res
         .status(500)
         .json(createErrorResponse("Failed to register token", error.message));
     }
   }
 );
+
+// Enhanced createOrUpdateUserToken function with better error handling
+const createOrUpdateUserToken = async (tokenData) => {
+  try {
+    console.log("=== Database Operation ===");
+    console.log(
+      "Attempting to save token data:",
+      JSON.stringify(tokenData, null, 2)
+    );
+
+    // First, try to get existing record
+    const { data: existingData, error: selectError } = await supabase.supabase
+      .from("user_tokens")
+      .select("*")
+      .eq("token", tokenData.token)
+      .single();
+
+    if (selectError && selectError.code !== "PGRST116") {
+      // PGRST116 = no rows returned
+      console.error("Error checking existing token:", selectError);
+      throw new Error(`Database select error: ${selectError.message}`);
+    }
+
+    if (existingData) {
+      console.log("Existing token found, updating...");
+      // Update existing record
+      const { data, error } = await supabase.supabase
+        .from("user_tokens")
+        .update({
+          generalNotificationsAllowed: tokenData.generalNotificationsAllowed,
+          userId: tokenData.userId,
+          updatedAt: tokenData.updatedAt,
+          deviceInfo: tokenData.deviceInfo,
+        })
+        .eq("token", tokenData.token)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Update error:", error);
+        throw new Error(`Failed to update token: ${error.message}`);
+      }
+
+      console.log("Token updated successfully:", data);
+      return data;
+    } else {
+      console.log("No existing token found, creating new...");
+      // Insert new record
+      const { data, error } = await supabase.supabase
+        .from("user_tokens")
+        .insert(tokenData)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Insert error:", error);
+        throw new Error(`Failed to create token: ${error.message}`);
+      }
+
+      console.log("Token created successfully:", data);
+      return data;
+    }
+  } catch (error) {
+    console.error("=== Database Error ===");
+    console.error("Error in createOrUpdateUserToken:", error);
+    throw error;
+  }
+};
+
+// Enhanced validation function
+const isValidExpoPushToken = (token) => {
+  try {
+    if (!token || typeof token !== "string") {
+      console.log("Token validation failed: not a string or empty");
+      return false;
+    }
+
+    const isValid = Expo.isExpoPushToken(token);
+    console.log(
+      `Token validation for ${token.substring(0, 20)}...: ${isValid}`
+    );
+    return isValid;
+  } catch (error) {
+    console.error("Error validating push token:", error);
+    return false;
+  }
+};
 
 // Send general push notifications
 app.post(
