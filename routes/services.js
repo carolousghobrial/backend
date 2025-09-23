@@ -171,7 +171,7 @@ app.post("/addserviceLesson", async (req, res) => {
 });
 
 app.get("/getServices", async (req, res) => {
-  const { data, error } = await supabase
+  const { data, error } = await supabase.supabase
     .from("services_table")
     .select("*")
     .not("service_id", "ilike", "%ds_level%");
