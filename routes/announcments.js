@@ -14,8 +14,7 @@ app.get("/", (req, res) => {
 const sendAnnouncementNotification = async (title, body, isEdit = false) => {
   try {
     const notificationEndpoint =
-      "https://stgntbackend-a14a35aa352d.herokuapp.com/notifications/sendPushNotification" ||
-      "http://localhost:3000/notifications/sendPushNotification";
+      "https://stgntbackend-a14a35aa352d.herokuapp.com/notifications/sendPushNotification";
 
     const requestBody = {
       title: isEdit ? `Updated: ${title}` : title,
