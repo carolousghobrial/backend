@@ -133,11 +133,6 @@ app.post(
         token,
         generalNotificationsAllowed,
         userId: userId.toString(), // Ensure userId is a string
-        updatedAt: new Date().toISOString(),
-        deviceInfo: {
-          userAgent: req.get("User-Agent") || "unknown",
-          ip: req.ip || req.connection.remoteAddress || "unknown",
-        },
         // Initialize service_subscribed as empty array if not exists
         service_subscribed: [],
       };
