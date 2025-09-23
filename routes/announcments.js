@@ -192,7 +192,6 @@ app.post("/editAnnouncment/:id", async (req, res) => {
         arabic_description,
         url,
         valid,
-        updated_at: new Date().toISOString(),
       })
       .eq("id", id)
       .select()
