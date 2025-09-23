@@ -171,9 +171,10 @@ app.post("/addserviceLesson", async (req, res) => {
 });
 
 app.get("/getServices", async (req, res) => {
-  const { data, error } = await supabase.supabase
+  const { data, error } = await supabase
     .from("services_table")
-    .select("*");
+    .select("*")
+    .not("service_id", "ilike", "%ds_level%");
 
   if (error) {
     res.status(500).send(error.message);
