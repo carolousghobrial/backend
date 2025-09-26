@@ -32,7 +32,7 @@ app.post("/addUserRoleBulk", async (req, res) => {
   try {
     // Extract the array of users and common role/service info
     const { users, role_id, service_id } = req.body;
-
+    console.log(users);
     // Validate input
     if (!users || !Array.isArray(users) || users.length === 0) {
       return res.status(400).json({
@@ -48,7 +48,7 @@ app.post("/addUserRoleBulk", async (req, res) => {
 
     // Create array of user service roles for bulk insert
     const userServiceRoles = users.map((user_id) => ({
-      user_id: user_id,
+      portal_id: user_id,
       role_id: role_id,
       service_id: service_id,
     }));

@@ -279,30 +279,114 @@ app.get("/getdeaconsschoolextrasbycourse/:course_id", async (req, res) => {
 });
 
 app.post("/addDSCalendarForLevel/:level", async (req, res) => {
-  const level = req.params.level;
+  try {
+    const level = req.params.level;
+    const { hymn_id, calendar_day, week_num, others_id, others_tablename } =
+      req.body;
 
-  const calendarRow = {
-    hymn_id: req.body.hymn_id,
-    calendar_day: req.body.calendar_day,
-    week_num: req.body.week_num,
-    others_id: req.body.others_id,
-    others_tablename: req.body.others_tablename,
-    teacher_id: req.body.teacher_id,
-    level: level,
-  };
-  console.log(calendarRow);
-  const { data, error } = await supabase.supabase
-    .from("ds_calendar_week")
-    .upsert(
-      [calendarRow],
-      { onConflict: ["calendar_day", "level"] } // Ensures uniqueness
-    )
-    .select();
-  console.log(error);
-  if (error) {
-    res.status(500).send(error.message);
-  } else {
-    res.send(data);
+    console.log("Received data:", {
+      level,
+      hymn_id,
+      calendar_day,
+      week_num,
+      others_id,
+      others_tablename,
+    });
+
+    if (!level || !calendar_day || !week_num) {
+      return res.status(400).json({
+        success: false,
+        message: "Level, calendar_day, and week_num are required",
+      });
+    }
+
+    const calendarRow = {
+      hymn_id: hymn_id || null,
+      calendar_day: calendar_day,
+      week_num: parseInt(week_num, 10),
+      others_id: others_id || null,
+      others_tablename: others_tablename || null,
+      level: level,
+    };
+
+    // Try delete first, then insert (simple upsert alternative)
+    const { data, error } = await supabase.supabase
+      .from("ds_calendar_week")
+      .upsert(
+        [calendarRow],
+        { onConflict: ["calendar_day", "level"] } // Ensures uniqueness
+      )
+      .select();
+
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({
+        success: false,
+        message: `Database error: ${error.message}`,
+        details: error,
+      });
+    }
+
+    console.log("Successfully saved:", data);
+
+    res.json({
+      success: true,
+      message: "Calendar updated successfully",
+      data: data,
+    });
+  } catch (error) {
+    console.error("Server error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+});
+app.post("/saveTeacherAssignments", async (req, res) => {
+  try {
+    const assignmentData = req.body;
+
+    // Validate required fields
+    if (!assignmentData.calendar_id || !assignmentData.course_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields: calendar_id and course_id",
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_calendar_teacher_assignments")
+      .upsert(
+        assignmentData, // Don't wrap in another object
+        {
+          onConflict: "calendar_id,course_id",
+          ignoreDuplicates: false,
+        }
+      )
+      .select();
+
+    if (error) {
+      console.error("Supabase error:", error);
+      return res.status(400).json({
+        success: false,
+        message: "Failed to save assignment",
+        error: error.message,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Assignment saved successfully",
+      data: data,
+    });
+  } catch (error) {
+    console.error("Server error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
   }
 });
 app.post("/addDSTeacher", async (req, res) => {
@@ -409,6 +493,96 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
         is_active,
         role,
         profiles:student_id (
+          portal_id,
+          first_name,
+          last_name,
+          email,
+          cellphone
+        )`
+      )
+      .eq("course_id", courseId)
+      .eq("is_active", true)
+      .order("profiles(first_name)", { ascending: true });
+
+    if (error) {
+      console.error("Error fetching students:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    // Fetch profile images for each student
+    const studentsWithImages = await Promise.all(
+      data.map(async (enrollment) => {
+        let profileImageUrl = null;
+
+        try {
+          // Using built-in fetch (Node.js 18+)
+          const imageResponse = await fetch(
+            `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`
+          );
+
+          if (imageResponse.ok) {
+            // Convert to base64 or get the blob URL
+            const imageBuffer = await imageResponse.arrayBuffer();
+            const base64Image = Buffer.from(imageBuffer).toString("base64");
+            profileImageUrl = `data:${imageResponse.headers.get(
+              "content-type"
+            )};base64,${base64Image}`;
+          }
+        } catch (imageError) {
+          console.warn(
+            `Failed to fetch image for portal_id ${enrollment.profiles.portal_id}:`,
+            imageError.message
+          );
+          // Continue without image - don't fail the entire request
+        }
+
+        return {
+          portal_id: enrollment.profiles.portal_id,
+          first_name: enrollment.profiles.first_name || "",
+          last_name: enrollment.profiles.last_name || "",
+          email: enrollment.profiles.email,
+          cellphone: enrollment.profiles.cellphone,
+          enrollment_id: enrollment.enrollment_id,
+          is_active: enrollment.is_active,
+          profile_pic: profileImageUrl,
+        };
+      })
+    );
+
+    res.json({
+      success: true,
+      data: studentsWithImages,
+      count: studentsWithImages.length,
+    });
+  } catch (error) {
+    console.error("Get students by course error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
+app.get("/getTeachersByCourse/:courseId", async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    if (!courseId) {
+      return res.status(400).json({
+        success: false,
+        error: "Course ID is required",
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_course_teachers")
+      .select(
+        `course_id,
+        is_active,
+        role,
+        profiles:teacher_id (
           portal_id,
           first_name,
           last_name,
@@ -603,6 +777,43 @@ app.get("/getClassSession/:courseId/:date", async (req, res) => {
       .select("*")
       .eq("course_id", courseId)
       .eq("session_date", date)
+      .single();
+    console.log(data);
+    if (error && error.code !== "PGRST116") {
+      console.error("Error fetching class session:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+    res.send(data);
+
+    // PGRST116 means no rows found, which is normal for new sessions
+  } catch (error) {
+    console.error("Get class session error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
+app.get("/getTeacherAssignments/:course_id/:calendar_id", async (req, res) => {
+  try {
+    const { course_id, calendar_id } = req.params;
+    console.log(course_id);
+    console.log(calendar_id);
+    if (!course_id || !calendar_id) {
+      return res.status(400).json({
+        success: false,
+        error: "Course ID and date are required",
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_calendar_teacher_assignments")
+      .select("*")
+      .eq("course_id", course_id)
+      .eq("calendar_id", calendar_id)
       .single();
     console.log(data);
     if (error && error.code !== "PGRST116") {
@@ -920,6 +1131,134 @@ app.post("/createAttendance", async (req, res) => {
     });
   }
 });
+app.post("/createTeacherAttendance", async (req, res) => {
+  try {
+    const {
+      course_id,
+      session_date,
+      topic,
+      notes,
+      recorded_by,
+      attendance_records,
+    } = req.body;
+
+    // Validation
+    if (!course_id || !session_date || !Array.isArray(attendance_records)) {
+      return res.status(400).json({
+        success: false,
+        error: "Course ID, session date, and attendance records are required",
+      });
+    }
+
+    if (attendance_records.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "At least one attendance record is required",
+      });
+    }
+
+    // Validate date format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(session_date)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid date format. Use YYYY-MM-DD",
+      });
+    }
+
+    // First, create the class session
+    const sessionBody = {
+      course_id: course_id,
+      session_date: session_date,
+      topic: topic || null,
+      notes: notes || null,
+      recorded_by: recorded_by,
+      created_at: new Date().toISOString(),
+    };
+
+    console.log("Creating session with data:", sessionBody);
+
+    const { data: sessionData, error: sessionError } = await supabase.supabase
+      .from("ds_class_sessions")
+      .insert([sessionBody])
+      .select()
+      .single();
+
+    if (sessionError) {
+      console.error("Error creating session:", sessionError);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to create class session",
+        details: sessionError.message,
+      });
+    }
+
+    console.log("Session created:", sessionData);
+
+    // Validate and prepare attendance records
+    const validatedRecords = [];
+    for (const record of attendance_records) {
+      if (!record.student_id || record.present === undefined) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Each attendance record must have student_id and present status",
+        });
+      }
+      console.log(course_id);
+      validatedRecords.push({
+        course_id: course_id,
+        teacher_id: record.teacher_id,
+        session_id: sessionData.session_id, // Use the created session ID
+        good_behavior: record.good_behavior, // Use 'present' field, not 'status'
+        present: record.present, // Use 'present' field, not 'status'
+        notes: record.notes || null,
+        recorded_by: recorded_by,
+        recorded_at: new Date().toISOString(),
+      });
+    }
+
+    console.log("Creating attendance records:", validatedRecords);
+
+    // Insert attendance records
+    const { data: attendanceData, error: attendanceError } =
+      await supabase.supabase
+        .from("ds_teacher_attendance")
+        .insert(validatedRecords)
+        .select();
+
+    if (attendanceError) {
+      console.error("Error creating attendance records:", attendanceError);
+
+      // Cleanup: delete the session if attendance insertion failed
+      await supabase.supabase
+        .from("ds_class_sessions")
+        .delete()
+        .eq("session_id", sessionData.session_id);
+
+      return res.status(500).json({
+        success: false,
+        error: "Failed to create attendance records",
+        details: attendanceError.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Attendance created successfully",
+      data: {
+        session: sessionData,
+        attendance_records: attendanceData,
+        total_records: attendanceData.length,
+      },
+    });
+  } catch (error) {
+    console.error("Create attendance error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
 
 /**
  * Update existing attendance session and records
@@ -984,6 +1323,93 @@ app.put("/updateAttendance/:sessionId", async (req, res) => {
     const { data: attendanceData, error: attendanceError } =
       await supabase.supabase
         .from("ds_attendance")
+        .insert(validatedRecords)
+        .select();
+
+    console.log("Attendance upsert result:", {
+      attendanceData,
+      attendanceError,
+    });
+
+    if (attendanceError) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to update attendance records",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Attendance updated successfully",
+      data: {
+        attendance_records: attendanceData,
+        total_records: attendanceData?.length || 0,
+      },
+    });
+  } catch (error) {
+    console.error("Update attendance error:", error);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+app.put("/updateTeacherAttendance/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { topic, notes, recorded_by, attendance_records, course_id } =
+      req.body;
+
+    if (!sessionId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Session ID is required" });
+    }
+
+    if (!Array.isArray(attendance_records)) {
+      return res.status(400).json({
+        success: false,
+        error: "Attendance records array is required",
+      });
+    }
+
+    // Update session info
+    const { error: sessionError } = await supabase.supabase
+      .from("ds_class_sessions")
+      .update({
+        topic: topic || null,
+        notes: notes || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("session_id", sessionId);
+
+    if (sessionError) {
+      console.error("Error updating session:", sessionError);
+      return res
+        .status(500)
+        .json({ success: false, error: "Failed to update session" });
+    }
+
+    // Validate and prepare attendance records
+    const validatedRecords = attendance_records.map((record) => ({
+      course_id,
+      teacher_id: record.teacher_id,
+      session_id: sessionId,
+      present: record.present,
+      good_behavior: record.good_behavior,
+      notes: record.notes || null,
+      recorded_by,
+      recorded_at: new Date().toISOString(),
+    }));
+    console.log(validatedRecords);
+    // Insert/update attendance
+    // First, delete existing attendance for this session
+    await supabase.supabase
+      .from("ds_teacher_attendance")
+      .delete()
+      .eq("session_id", sessionId);
+
+    // Then insert the new records
+    const { data: attendanceData, error: attendanceError } =
+      await supabase.supabase
+        .from("ds_teacher_attendance")
         .insert(validatedRecords)
         .select();
 
@@ -1529,6 +1955,40 @@ app.get("/getAssessmentItemsByCourse/:course_id", async (req, res) => {
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
+app.get(
+  "/getAssessmentItemsByCourseAndCategory/:course_id/:category_id",
+  async (req, res) => {
+    try {
+      const { course_id, category_id } = req.params;
+
+      const { data, error } = await supabase.supabase
+        .from("ds_assessment_items")
+        .select(
+          `
+        *,
+        ds_grading_categories:category_id (
+          category_name,
+          weight_percentage
+        )
+      `
+        )
+        .eq("course_id", course_id)
+        .eq("category_id", category_id)
+        .eq("is_active", true)
+        .order("item_name");
+
+      if (error) {
+        console.error("Error fetching assessment items:", error);
+        return res.status(500).json({ success: false, error: error.message });
+      }
+
+      res.json({ success: true, data });
+    } catch (err) {
+      console.error("Unexpected error:", err);
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  }
+);
 
 // Get available hymns/rituals/etc for assessment creation
 app.get("/getAvailableItems/:category", async (req, res) => {
