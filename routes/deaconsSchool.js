@@ -1,7 +1,17 @@
 const express = require("express");
 const bp = require("body-parser");
 const app = express();
+const multer = require("multer");
+const path = require("path");
+const { v4: uuidv4 } = require("uuid");
+
 const supabase = require("../config/config");
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+});
+
 const daysOfWeek = [
   "Sunday",
   "Monday",
@@ -39,12 +49,206 @@ app.get("/getCourses", async (req, res) => {
 
   res.send(deacons_school_hymns);
 });
+app.put(
+  "/updateHymn/:id",
+  upload.fields([
+    { name: "hymn_file", maxCount: 1 },
+    { name: "hazzat_file", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      console.log("Received update request for hymn ID:", id);
+      console.log("Request body:", req.body);
+      console.log("Files received:", req.files);
+
+      // Extract hymn data from request body
+      const {
+        idx,
+        hymn_name,
+        hymn_recording,
+        level_hymn_in,
+        hymn_file_location,
+        hymn_ritual,
+        points,
+        hazzat,
+        order_taught,
+        created_at,
+      } = req.body;
+
+      // Validate required fields
+      if (!hymn_name || !hymn_recording || !level_hymn_in || !hymn_ritual) {
+        return res.status(400).send({
+          error:
+            "Hymn name, recording, level, and ritual description are required",
+        });
+      }
+
+      // Prepare update data
+      const updateData = {
+        hymn_name,
+        hymn_recording,
+        level_hymn_in,
+        hymn_file_location, // Keep existing URL if no new file uploaded
+        hymn_ritual,
+        points: parseInt(points),
+        hazzat: hazzat || null, // Keep existing URL if no new file uploaded
+        order_taught: parseInt(order_taught),
+        created_at,
+      };
+
+      // Update hymn in database first
+      const { data, error } = await supabase.supabase
+        .from("deacons_school_hymns")
+        .update(updateData)
+        .eq("id", id)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Database update error:", error);
+        throw new Error("Error updating hymn in database");
+      }
+
+      let finalHymnFileUrl = hymn_file_location;
+      let finalHazzatUrl = hazzat || null;
+
+      // Handle hymn file upload ONLY if new file provided
+      if (
+        req.files &&
+        req.files["hymn_file"] &&
+        req.files["hymn_file"].length > 0
+      ) {
+        try {
+          console.log("Processing hymn file upload...");
+          const hymnFile = req.files["hymn_file"][0];
+          const fileExt = path.extname(hymnFile.originalname);
+          const fileName = `hymn_${data.id}_${uuidv4()}${fileExt}`;
+          const filePath = `hymns_files_json/${fileName}`;
+
+          // Upload file to Supabase Storage
+          const { data: fileData, error: uploadError } =
+            await supabase.supabase.storage
+              .from("hymns_files_json")
+              .upload(filePath, hymnFile.buffer, {
+                contentType: hymnFile.mimetype,
+                upsert: true,
+              });
+
+          if (uploadError) {
+            console.error("Hymn file upload error:", uploadError);
+            throw new Error("Error uploading hymn file to storage");
+          }
+
+          // Get public URL of the uploaded file
+          const { data: publicUrlData } = supabase.supabase.storage
+            .from("hymns_files_json")
+            .getPublicUrl(filePath);
+
+          finalHymnFileUrl = publicUrlData.publicUrl;
+          console.log("Hymn file uploaded successfully:", finalHymnFileUrl);
+
+          // Update hymn with file URL in database
+          const { error: updateError } = await supabase.supabase
+            .from("deacons_school_hymns")
+            .update({ hymn_file_location: finalHymnFileUrl })
+            .eq("id", data.id);
+
+          if (updateError) {
+            console.error("Hymn file URL update error:", updateError);
+            throw new Error("Error updating hymn file URL in database");
+          }
+        } catch (fileError) {
+          console.error("Hymn file processing failed:", fileError);
+          console.log("Continuing without hymn file due to upload failure");
+        }
+      } else {
+        console.log("No new hymn file uploaded, keeping existing URL");
+      }
+
+      // Handle hazzat file upload ONLY if new file provided
+      if (
+        req.files &&
+        req.files["hazzat_file"] &&
+        req.files["hazzat_file"].length > 0
+      ) {
+        try {
+          console.log("Processing hazzat file upload...");
+          const hazzatFile = req.files["hazzat_file"][0];
+          const fileExt = path.extname(hazzatFile.originalname);
+          const fileName = `hazzat_${data.id}_${uuidv4()}${fileExt}`;
+
+          // Upload file to Supabase Storage
+          const { data: fileData, error: uploadError } =
+            await supabase.supabase.storage
+              .from("deacons_school_hymns_files")
+              .upload(fileName, hazzatFile.buffer, {
+                contentType: hazzatFile.mimetype,
+                upsert: true,
+              });
+
+          if (uploadError) {
+            console.error("Hazzat file upload error:", uploadError);
+            throw new Error("Error uploading hazzat file to storage");
+          }
+
+          // Get public URL of the uploaded file
+          const { data: publicUrlData } = supabase.supabase.storage
+            .from("deacons_school_hymns_files")
+            .getPublicUrl(fileName);
+
+          finalHazzatUrl = publicUrlData.publicUrl;
+          console.log("Hazzat file uploaded successfully:", finalHazzatUrl);
+
+          // Update hymn with hazzat URL in database
+          const { error: updateError } = await supabase.supabase
+            .from("deacons_school_hymns")
+            .update({ hazzat: finalHazzatUrl })
+            .eq("id", data.id);
+
+          if (updateError) {
+            console.error("Hazzat URL update error:", updateError);
+            throw new Error("Error updating hazzat URL in database");
+          }
+        } catch (hazzatError) {
+          console.error("Hazzat file processing failed:", hazzatError);
+          console.log("Continuing without hazzat file due to upload failure");
+        }
+      } else {
+        console.log("No new hazzat file uploaded, keeping existing URL");
+      }
+
+      res.send({
+        ok: true,
+        data: {
+          ...data,
+          hymn_file_location: finalHymnFileUrl,
+          hazzat: finalHazzatUrl,
+        },
+        message: "Hymn updated successfully",
+      });
+    } catch (error) {
+      console.error("Error in updateHymn:", error.message);
+      res.status(500).send({
+        error: "An error occurred while processing the request",
+        details: error.message,
+      });
+    }
+  }
+);
 app.get("/getHymnsByLevel/:level", async (req, res) => {
   const level = req.params.level;
   let { data: data, error } = await supabase.supabase
     .from("deacons_school_hymns")
     .select("*")
     .eq("level_hymn_in", level);
+  res.send(data);
+});
+app.get("/getAllHymns", async (req, res) => {
+  let { data: data, error } = await supabase.supabase
+    .from("deacons_school_hymns")
+    .select("*");
   res.send(data);
 });
 app.get("/getHymn/:id", async (req, res) => {

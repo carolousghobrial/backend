@@ -244,6 +244,7 @@ app.post("/register", async (req, res) => {
             cellphone: newUser.cellphone,
             portal_id: newUser.portal_id,
             family_id: newUser.family_id,
+
             family_role: newUser.family_role,
           },
         },
@@ -747,6 +748,33 @@ app.get("/getUsers", async (req, res) => {
     }
 
     res.send(data);
+  } catch (error) {
+    console.error("Get users error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch users",
+    });
+  }
+});
+app.get("/getAuthEmails", async (req, res) => {
+  try {
+    const perPage = 1000;
+    let page = 1;
+    const { data, error } = await supabase.supabase.auth.admin.listUsers({
+      page,
+      perPage,
+    });
+
+    console.log(error);
+    if (error) {
+      console.error("Get users error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    res.send(data.users);
   } catch (error) {
     console.error("Get users error:", error);
     res.status(500).json({

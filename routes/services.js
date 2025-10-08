@@ -138,6 +138,50 @@ app.post("/updateUserRoleService", async (req, res) => {
     });
   }
 });
+app.post("/updateDSTeacherCourse", async (req, res) => {
+  try {
+    // Extract the array of users and common role/service info
+    const { teacher_id, role_id, course_id } = req.body;
+    if (!role_id || !course_id) {
+      return res.status(400).json({
+        error: "Missing required 'role_id' or 'service_id'",
+      });
+    }
+
+    // Perform bulk insert
+    const { data, error } = await supabase.supabase
+      .from("ds_course_teachers")
+      .update({ course_id: course_id })
+      .eq("teacher_id", teacher_id)
+      .eq("role", role_id)
+      .select(); // Add select() to return the inserted data
+
+    if (error) {
+      console.error("Supabase error:", error);
+      return res.status(500).json({
+        error: error.message,
+        details: error.details || "No additional details available",
+      });
+    }
+
+    console.log("Successfully updated:", data?.length || 0, "records");
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully added ${
+        data?.length || userServiceRoles.length
+      } user role assignments`,
+      inserted_count: data?.length || userServiceRoles.length,
+      data: data,
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({
+      error: "Internal server error",
+      details: err.message,
+    });
+  }
+});
 app.post("/addserviceLesson", async (req, res) => {
   const serviceLesson = {
     service: req.body.service,
@@ -324,17 +368,37 @@ app.get("/getRoles", async (req, res) => {
     res.send(data);
   }
 });
-app.delete("/deleteUserRole/:id", async (req, res) => {
-  const id = req.params.id;
-  const { data: data, error: error } = await supabase.supabase
-    .from("user_service_roles")
-    .delete()
-    .match({ id: id });
+app.delete("/deleteDSTeacher", async (req, res) => {
+  try {
+    const { teacher_id, course_id } = req.body;
 
-  if (error) {
-    res.status(500).send(error.message);
-  } else {
-    res.send({ ok: true });
+    // Validate input
+    if (!teacher_id || !course_id) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    console.log(teacher_id);
+    console.log(course_id);
+    // Perform delete
+    const { data, error } = await supabase.supabase
+      .from("ds_course_teachers")
+      .delete()
+      .match({ teacher_id, course_id })
+      .select();
+
+    if (error) {
+      console.error("Error deleting teacher:", error.message);
+      return res.status(500).json({ error: error.message });
+    }
+
+    // Handle no record deleted
+    if (!data || data.length === 0) {
+      return res.status(404).json({ message: "No matching record found" });
+    }
+
+    res.json({ success: true, deleted: data.length });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
