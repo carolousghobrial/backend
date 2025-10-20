@@ -357,7 +357,7 @@ app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
     }
 
     // CRITICAL FIX: Updated redirect URL to match Supabase token delivery
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:4200";
+    const frontendUrl = "https://www.stgeorgecocnashville.org";
     const redirectUrl = `${frontendUrl}/reset-password`;
 
     console.log("Sending password reset email with redirect to:", redirectUrl);
