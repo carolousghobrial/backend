@@ -244,7 +244,6 @@ app.post("/register", async (req, res) => {
             cellphone: newUser.cellphone,
             portal_id: newUser.portal_id,
             family_id: newUser.family_id,
-
             family_role: newUser.family_role,
           },
         },
@@ -303,183 +302,9 @@ app.post("/register", async (req, res) => {
 });
 
 /**
- * Verify reset token endpoint - optional helper to validate tokens
+ * Forgot password endpoint - FIXED VERSION
  */
-/**
- * Verify password reset token endpoint (Fixed version)
- */
-app.post("/verifyResetToken", async (req, res) => {
-  try {
-    const { token } = req.body;
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: "Reset token is required",
-      });
-    }
-
-    console.log("Verifying reset token:", token);
-
-    // For Supabase, we need to verify the session token directly
-    const {
-      data: { user },
-      error,
-    } = await supabase.supabase.auth.getUser(token);
-
-    if (error || !user) {
-      console.error("Token verification error:", error);
-      return res.status(400).json({
-        success: false,
-        message: "Invalid or expired reset token",
-      });
-    }
-
-    // Get user profile for additional info
-    const { data: profile, error: profileError } = await supabase.supabase
-      .from("profiles")
-      .select("email, first_name, last_name")
-      .eq("id", user.id)
-      .single();
-
-    const userEmail = profile?.email || user.email;
-
-    res.json({
-      success: true,
-      message: "Reset token is valid",
-      email: userEmail,
-      user: {
-        id: user.id,
-        email: userEmail,
-      },
-    });
-  } catch (error) {
-    console.error("Verify reset token error:", error);
-    res.status(500).json({
-      success: false,
-      message: "An error occurred while verifying the reset token",
-    });
-  }
-});
-
-/**
- * Password reset endpoint - Fixed for Supabase
- */
-app.post("/resetPassword", async (req, res) => {
-  try {
-    const { token, new_password } = req.body;
-
-    console.log("=== Password Reset Debug ===");
-    console.log("Token received:", token ? "Present" : "Missing");
-    console.log("Token length:", token ? token.length : 0);
-    console.log("Password received:", new_password ? "Present" : "Missing");
-
-    if (!token || !new_password) {
-      return res.status(400).json({
-        success: false,
-        message: "Access token and new password are required",
-      });
-    }
-
-    if (new_password.length < 8) {
-      return res.status(400).json({
-        success: false,
-        message: "Password must be at least 8 characters long",
-      });
-    }
-
-    console.log("Attempting password reset with existing Supabase client...");
-
-    // First verify the token is valid by getting the user
-    const {
-      data: { user },
-      error: getUserError,
-    } = await supabase.supabase.auth.getUser(token);
-
-    if (getUserError || !user) {
-      console.error("Token validation failed:", getUserError);
-      return res.status(400).json({
-        success: false,
-        message: "Invalid or expired token",
-        debug: {
-          error: getUserError?.message,
-        },
-      });
-    }
-
-    console.log("Token valid for user:", user.email);
-
-    // Use the token to make a direct API call to Supabase
-    // This approach works without needing admin permissions or creating new clients
-
-    try {
-      const supabaseUrl =
-        process.env.SUPABASE_URL || "https://oplzcugljytvywvewdkj.supabase.co";
-
-      // Make direct API call to update password
-      const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-          apikey:
-            process.env.SUPABASE_ANON_KEY || supabase.supabase.supabaseKey,
-        },
-        body: JSON.stringify({
-          password: new_password,
-        }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        console.error("Password update error via API:", result);
-        return res.status(400).json({
-          success: false,
-          message: result.message || "Failed to update password",
-          debug: {
-            status: response.status,
-            error: result,
-          },
-        });
-      }
-
-      const updatedUser = result;
-    } catch (fetchError) {
-      console.error("Fetch error:", fetchError);
-      return res.status(500).json({
-        success: false,
-        message: "Failed to communicate with authentication service",
-        debug: {
-          error: fetchError.message,
-        },
-      });
-    }
-
-    console.log("Password updated successfully for user:", user.email);
-
-    res.json({
-      success: true,
-      message: "Password reset successfully",
-      user: {
-        id: user.id, // Use the original user data from token verification
-        email: user.email,
-      },
-    });
-  } catch (error) {
-    console.error("Reset password error:", error);
-    res.status(500).json({
-      success: false,
-      message: "An error occurred while resetting the password",
-      debug: {
-        error: error.message,
-      },
-    });
-  }
-});
-
-// Update your forgot password to ensure proper redirect URL
-app.post("/forgotPassword", async (req, res) => {
+app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
   try {
     console.log("=== Forgot Password Request ===");
     const { email } = req.body;
@@ -522,6 +347,7 @@ app.post("/forgotPassword", async (req, res) => {
 
     if (!existingUser) {
       console.log("Password reset requested for non-existent email:", email);
+      // Return success anyway for security (don't reveal if email exists)
       return res.json({
         success: true,
         message:
@@ -530,9 +356,9 @@ app.post("/forgotPassword", async (req, res) => {
       });
     }
 
-    // Updated redirect URL to match your email template pattern
+    // CRITICAL FIX: Updated redirect URL to match Supabase token delivery
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:4200";
-    const redirectUrl = `${frontendUrl}/reset-password`; // Base URL, token will be appended by Supabase
+    const redirectUrl = `${frontendUrl}/reset-password`;
 
     console.log("Sending password reset email with redirect to:", redirectUrl);
 
@@ -541,9 +367,6 @@ app.post("/forgotPassword", async (req, res) => {
       email.toLowerCase().trim(),
       {
         redirectTo: redirectUrl,
-        data: {
-          user_name: existingUser.first_name || "User",
-        },
       }
     );
 
@@ -559,6 +382,7 @@ app.post("/forgotPassword", async (req, res) => {
       }
 
       if (error.message.includes("not found")) {
+        // Return success for security
         return res.json({
           success: true,
           message:
@@ -575,8 +399,6 @@ app.post("/forgotPassword", async (req, res) => {
 
     console.log("Password reset email sent successfully to:", email);
 
-    // Optional: Log the reset request
-
     res.json({
       success: true,
       message:
@@ -592,11 +414,167 @@ app.post("/forgotPassword", async (req, res) => {
   }
 });
 
-// ==================== AUTHENTICATED ROUTES ====================
+/**
+ * Verify password reset token endpoint - FIXED VERSION
+ */
+app.post("/verifyResetToken", async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "Reset token is required",
+      });
+    }
+
+    console.log("Verifying reset token...");
+
+    // Verify the session token directly with Supabase
+    const {
+      data: { user },
+      error,
+    } = await supabase.supabase.auth.getUser(token);
+
+    if (error || !user) {
+      console.error("Token verification error:", error);
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired reset token",
+      });
+    }
+
+    // Get user profile for additional info
+    const { data: profile, error: profileError } = await supabase.supabase
+      .from("profiles")
+      .select("email, first_name, last_name")
+      .eq("id", user.id)
+      .single();
+
+    const userEmail = profile?.email || user.email;
+
+    console.log("Token verified successfully for:", userEmail);
+
+    res.json({
+      success: true,
+      message: "Reset token is valid",
+      email: userEmail,
+      user: {
+        id: user.id,
+        email: userEmail,
+      },
+    });
+  } catch (error) {
+    console.error("Verify reset token error:", error);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while verifying the reset token",
+    });
+  }
+});
 
 /**
- * Get logged in user info
+ * Password reset endpoint - FIXED VERSION
  */
+app.post("/resetPassword", async (req, res) => {
+  try {
+    const { token, new_password } = req.body;
+
+    console.log("=== Password Reset Debug ===");
+    console.log("Token received:", token ? "Present" : "Missing");
+    console.log("Token length:", token ? token.length : 0);
+    console.log("Password received:", new_password ? "Present" : "Missing");
+
+    if (!token || !new_password) {
+      return res.status(400).json({
+        success: false,
+        message: "Access token and new password are required",
+      });
+    }
+
+    if (new_password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters long",
+      });
+    }
+
+    console.log("Attempting password reset...");
+
+    // First verify the token is valid by getting the user
+    const {
+      data: { user },
+      error: getUserError,
+    } = await supabase.supabase.auth.getUser(token);
+
+    if (getUserError || !user) {
+      console.error("Token validation failed:", getUserError);
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired token",
+      });
+    }
+
+    console.log("Token valid for user:", user.email);
+
+    // Make direct API call to Supabase to update password
+    const supabaseUrl =
+      process.env.SUPABASE_URL || "https://oplzcugljytvywvewdkj.supabase.co";
+    const supabaseAnonKey =
+      process.env.SUPABASE_ANON_KEY || supabase.supabase.supabaseKey;
+
+    try {
+      const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          apikey: supabaseAnonKey,
+        },
+        body: JSON.stringify({
+          password: new_password,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        console.error("Password update error via API:", result);
+        return res.status(400).json({
+          success: false,
+          message: result.message || "Failed to update password",
+        });
+      }
+
+      console.log("Password updated successfully for user:", user.email);
+
+      res.json({
+        success: true,
+        message:
+          "Password reset successfully. You can now login with your new password.",
+        user: {
+          id: user.id,
+          email: user.email,
+        },
+      });
+    } catch (fetchError) {
+      console.error("Fetch error:", fetchError);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to communicate with authentication service",
+      });
+    }
+  } catch (error) {
+    console.error("Reset password error:", error);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while resetting the password",
+    });
+  }
+});
+
+// ==================== AUTHENTICATED ROUTES ====================
+
 /**
  * Get logged in user info
  */
@@ -642,20 +620,18 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
         message: "No profiles found",
       });
     }
-    // Fetch profile images for each student
-    console.log(profiles);
+
+    // Fetch profile images for each profile
     const profilesWithImages = await Promise.all(
       profiles.map(async (profile) => {
         let profileImageUrl = null;
 
         try {
-          // Using built-in fetch (Node.js 18+)
           const imageResponse = await fetch(
             `https://api.suscopts.org/image/${profile.portal_id}`
           );
 
           if (imageResponse.ok) {
-            // Convert to base64 or get the blob URL
             const imageBuffer = await imageResponse.arrayBuffer();
             const base64Image = Buffer.from(imageBuffer).toString("base64");
             profileImageUrl = `data:${imageResponse.headers.get(
@@ -667,8 +643,8 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
             `Failed to fetch image for portal_id ${profile.portal_id}:`,
             imageError.message
           );
-          // Continue without image - don't fail the entire request
         }
+
         return {
           id: profile.id,
           portal_id: profile.portal_id,
@@ -682,8 +658,8 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
         };
       })
     );
-    // Return consistent response format
 
+    // Return consistent response format
     res.json({
       success: true,
       user: profilesWithImages[0], // Primary profile
@@ -738,7 +714,7 @@ app.get("/getUsers", async (req, res) => {
       .from("profiles")
       .select("*")
       .order("portal_id", { ascending: false });
-    console.log(error);
+
     if (error) {
       console.error("Get users error:", error);
       return res.status(500).json({
@@ -756,6 +732,7 @@ app.get("/getUsers", async (req, res) => {
     });
   }
 });
+
 app.get("/getAuthEmails", async (req, res) => {
   try {
     const perPage = 1000;
@@ -765,7 +742,6 @@ app.get("/getAuthEmails", async (req, res) => {
       perPage,
     });
 
-    console.log(error);
     if (error) {
       console.error("Get users error:", error);
       return res.status(500).json({
@@ -783,10 +759,11 @@ app.get("/getAuthEmails", async (req, res) => {
     });
   }
 });
+
 app.get("/getUserEmails", async (req, res) => {
   try {
     const { data, error } = await supabase.supabase.rpc("get_all_user_emails");
-    console.log(error);
+
     if (error) {
       console.error("Get users error:", error);
       return res.status(500).json({
@@ -803,67 +780,6 @@ app.get("/getUserEmails", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch users",
-    });
-  }
-});
-app.get("/addProfilesToUserService", async (req, res) => {
-  try {
-    // 1. Get all profiles
-    const { data: profiles, error } = await supabase.supabase
-      .from("profiles")
-      .select("*")
-      .order("portal_id", { ascending: false });
-
-    if (error) {
-      console.error("Get users error:", error);
-      return res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-
-    // 2. Insert each profile into user_service_roles
-    for (const profile of profiles) {
-      if (profile.email == "fr.serapion@gmail.com") {
-        const { error: insertError } = await supabase.supabase
-          .from("user_service_roles") // 👈 change this to your target table
-          .insert({
-            portal_id: profile.portal_id, // 👈 adjust column names as needed
-            role_id: "priest", // example static role
-            service_id: "congregation", // example static service
-          });
-        if (insertError) {
-          console.error(
-            `Insert error for user ${profile.portal_id}:`,
-            insertError.message
-          );
-        }
-      } else {
-        const { error: insertError } = await supabase.supabase
-          .from("user_service_roles") // 👈 change this to your target table
-          .insert({
-            portal_id: profile.portal_id, // 👈 adjust column names as needed
-            role_id: "member", // example static role
-            service_id: "congregation", // example static service
-          });
-        if (insertError) {
-          console.error(
-            `Insert error for user ${profile.portal_id}:`,
-            insertError.message
-          );
-        }
-      }
-    }
-
-    res.json({
-      success: true,
-      message: "Profiles inserted into user_service_roles",
-    });
-  } catch (err) {
-    console.error("Unexpected error:", err);
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
     });
   }
 });
@@ -914,7 +830,7 @@ app.get("/getUserById/:id", authenticateToken, async (req, res) => {
 
     res.json({
       success: true,
-      data: [profile], // Return as array for consistency
+      data: [profile],
     });
   } catch (error) {
     console.error("Get user by ID error:", error);
@@ -931,18 +847,13 @@ app.get("/getUserById/:id", authenticateToken, async (req, res) => {
 app.get("/getUserByPortal/:portal_id", async (req, res) => {
   try {
     const { portal_id } = req.params;
-
-    // Keep as string since database column is text
     const cleanPortalId = String(portal_id).trim();
 
     const { data: profile, error } = await supabase.supabase
       .from("profiles")
       .select("*")
-      .eq("portal_id", cleanPortalId) // Remove parseInt() - keep as string
+      .eq("portal_id", cleanPortalId)
       .single();
-
-    console.log("Searching for portal_id:", cleanPortalId);
-    console.log("Found profile:", profile);
 
     if (error) {
       console.error("Get user by portal ID error:", error);
@@ -964,6 +875,7 @@ app.get("/getUserByPortal/:portal_id", async (req, res) => {
     });
   }
 });
+
 /**
  * Update user
  */
@@ -979,12 +891,9 @@ app.post("/updateUser/:portal_id", authenticateToken, async (req, res) => {
       email,
     };
 
-    // Only add dob if provided
     if (dob) {
       updateData.dob = new Date(dob);
     }
-
-    console.log("Updating user:", portal_id, updateData);
 
     const { data, error } = await supabase.supabase
       .from("profiles")
@@ -1084,17 +993,17 @@ app.post("/createUser", async (req, res) => {
 app.get("/getRolesAndServiceOfUser/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    console.log(userId);
+
     const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
       "get_user_roles_and_services",
       { p_user_id: userId }
     );
-    console.log(rpcData);
+
     if (rpcError) {
       console.error("Get user roles error:", rpcError);
       return res.status(500).json({
         success: false,
-        message: error.message,
+        message: rpcError.message,
       });
     }
 
@@ -1156,8 +1065,6 @@ app.delete("/deleteUser/:uid", authenticateToken, async (req, res) => {
   try {
     const { uid } = req.params;
 
-    console.log("Deleting user:", uid);
-
     // Delete from Supabase Auth
     const { data: authData, error: authError } =
       await supabase.supabase.auth.admin.deleteUser(uid);
@@ -1178,7 +1085,6 @@ app.delete("/deleteUser/:uid", authenticateToken, async (req, res) => {
 
     if (profileError) {
       console.warn("Delete user profile error:", profileError);
-      // Don't fail the entire operation if profile deletion fails
     }
 
     res.json({
@@ -1210,7 +1116,7 @@ app.post("/registerwithoutemail", async (req, res) => {
       family_id,
       family_role,
     } = req.body;
-    console.log(email);
+
     // Check if user already exists
     const { data: existingProfile, error: checkError } = await supabase.supabase
       .from("profiles")
@@ -1218,14 +1124,13 @@ app.post("/registerwithoutemail", async (req, res) => {
       .eq("email", email);
 
     if (checkError && checkError.code !== "PGRST116") {
-      // PGRST116 means no rows found
       console.error("Check existing user error:", checkError);
       return res.status(500).json({
         success: false,
         message: "Error checking existing user",
       });
     }
-    console.log(existingProfile);
+
     const newUser = {
       id: existingProfile[0].id,
       first_name,
@@ -1267,6 +1172,7 @@ app.post("/registerwithoutemail", async (req, res) => {
 });
 
 // ==================== UTILITY ROUTES ====================
+
 app.get("/getUserByPortalId/:portal_id", async (req, res) => {
   const { portal_id } = req.params;
   const { data: profile, error: checkError } = await supabase.supabase
@@ -1274,9 +1180,10 @@ app.get("/getUserByPortalId/:portal_id", async (req, res) => {
     .select("*")
     .eq("portal_id", portal_id)
     .single();
-  console.log(profile);
+
   res.send(profile);
 });
+
 /**
  * Get current user by token (alternative endpoint)
  */
@@ -1284,7 +1191,6 @@ app.get("/getCurrentUser/:uid", optionalAuth, async (req, res) => {
   try {
     const { uid } = req.params;
 
-    // Try to get user by the provided token/uid
     const {
       data: { user },
       error,
