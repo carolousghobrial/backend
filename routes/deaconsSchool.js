@@ -3,7 +3,6 @@ const bp = require("body-parser");
 const app = express();
 const multer = require("multer");
 const path = require("path");
-const { v4: uuidv4 } = require("uuid");
 
 const supabase = require("../config/config");
 const storage = multer.memoryStorage();
@@ -124,7 +123,7 @@ app.put(
           console.log("Processing hymn file upload...");
           const hymnFile = req.files["hymn_file"][0];
           const fileExt = path.extname(hymnFile.originalname);
-          const fileName = `hymn_${data.id}_${uuidv4()}${fileExt}`;
+          const fileName = `hymn_${data.id}_${fileExt}`;
           const filePath = `hymns_files_json/${fileName}`;
 
           // Upload file to Supabase Storage
@@ -177,7 +176,7 @@ app.put(
           console.log("Processing hazzat file upload...");
           const hazzatFile = req.files["hazzat_file"][0];
           const fileExt = path.extname(hazzatFile.originalname);
-          const fileName = `hazzat_${data.id}_${uuidv4()}${fileExt}`;
+          const fileName = `hazzat_${data.id}_${fileExt}`;
 
           // Upload file to Supabase Storage
           const { data: fileData, error: uploadError } =
