@@ -76,14 +76,6 @@ app.put(
         created_at,
       } = req.body;
 
-      // Validate required fields
-      if (!hymn_name || !hymn_recording || !level_hymn_in || !hymn_ritual) {
-        return res.status(400).send({
-          error:
-            "Hymn name, recording, level, and ritual description are required",
-        });
-      }
-
       // Prepare update data
       const updateData = {
         hymn_name,

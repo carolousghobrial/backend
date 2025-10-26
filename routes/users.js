@@ -124,7 +124,7 @@ app.get("/", async (req, res) => {
 });
 
 /**
- * Login endpoint
+ * Login endpoint - FIXED: Returns both access and refresh tokens
  */
 app.post("/login", async (req, res) => {
   try {
@@ -175,6 +175,7 @@ app.post("/login", async (req, res) => {
     const responseData = {
       success: true,
       token: authData.session.access_token,
+      refreshToken: authData.session.refresh_token, // FIXED: Include refresh token
       user: profile || {
         id: authData.user.id,
         email: authData.user.email,
@@ -190,6 +191,65 @@ app.post("/login", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Internal server error during login",
+    });
+  }
+});
+
+/**
+ * Refresh token endpoint - FIXED: New endpoint to keep session alive
+ */
+app.post("/refreshToken", async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        success: false,
+        message: "Refresh token is required",
+      });
+    }
+
+    // Refresh the session using Supabase
+    const { data: authData, error: authError } =
+      await supabase.supabase.auth.refreshSession({
+        refresh_token: refreshToken,
+      });
+
+    if (authError || !authData.session) {
+      console.error("Token refresh error:", authError);
+      return res.status(401).json({
+        success: false,
+        message: "Failed to refresh token",
+      });
+    }
+
+    // Get updated user profile
+    const { data: profile, error: profileError } = await supabase.supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", authData.user.id)
+      .single();
+
+    if (profileError) {
+      console.error("Profile fetch error:", profileError);
+    }
+
+    res.json({
+      success: true,
+      token: authData.session.access_token,
+      refreshToken: authData.session.refresh_token,
+      user: profile || {
+        id: authData.user.id,
+        email: authData.user.email,
+        ...authData.user.user_metadata,
+      },
+      session: authData.session,
+    });
+  } catch (error) {
+    console.error("Refresh token error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error during token refresh",
     });
   }
 });
@@ -323,358 +383,106 @@ app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
     if (!emailRegex.test(email)) {
       return res.status(400).json({
         success: false,
-        message: "Please enter a valid email address",
+        message: "Invalid email format",
       });
     }
 
-    console.log("Password reset request for email:", email);
+    // Check if user exists in profiles table
+    const { data: profile, error: profileError } = await supabase.supabase
+      .from("profiles")
+      .select("email")
+      .eq("email", email)
+      .maybeSingle();
 
-    // Check if user exists in profiles table first
-    const { data: existingUser, error: userCheckError } =
-      await supabase.supabase
-        .from("profiles")
-        .select("id, email, first_name, last_name")
-        .eq("email", email.toLowerCase().trim())
-        .single();
-
-    if (userCheckError && userCheckError.code !== "PGRST116") {
-      console.error("Error checking user existence:", userCheckError);
+    if (profileError) {
+      console.error("Profile check error:", profileError);
       return res.status(500).json({
         success: false,
-        message: "An error occurred while processing your request",
+        message: "Error checking user profile",
       });
     }
 
-    if (!existingUser) {
-      console.log("Password reset requested for non-existent email:", email);
-      // Return success anyway for security (don't reveal if email exists)
+    if (!profile) {
+      // Don't reveal if user exists for security
       return res.json({
         success: true,
         message:
-          "If an account with that email exists, we've sent a password reset link.",
-        email: email,
+          "If an account exists with this email, a password reset link has been sent",
       });
     }
 
-    // CRITICAL FIX: Updated redirect URL to match Supabase token delivery
-    const frontendUrl = "https://www.stgeorgecocnashville.org";
-    const redirectUrl = `${frontendUrl}/reset-password`;
-
-    console.log("Sending password reset email with redirect to:", redirectUrl);
-
-    // Send password reset email via Supabase Auth
+    // Send password reset email via Supabase
     const { data, error } = await supabase.supabase.auth.resetPasswordForEmail(
-      email.toLowerCase().trim(),
-      {
-        redirectTo: redirectUrl,
-      }
+      email
     );
 
     if (error) {
-      console.error("Supabase password reset error:", error);
-
-      if (error.message.includes("rate limit")) {
-        return res.status(429).json({
-          success: false,
-          message:
-            "Too many reset requests. Please wait a few minutes before trying again.",
-        });
-      }
-
-      if (error.message.includes("not found")) {
-        // Return success for security
-        return res.json({
-          success: true,
-          message:
-            "If an account with that email exists, we've sent a password reset link.",
-          email: email,
-        });
-      }
-
+      console.error("Supabase reset error:", error);
       return res.status(400).json({
         success: false,
-        message: "Unable to send password reset email. Please try again later.",
+        message: error.message || "Failed to send reset email",
       });
     }
 
     console.log("Password reset email sent successfully to:", email);
-
     res.json({
       success: true,
       message:
-        "We've sent a password reset link to your email address. Please check your inbox and follow the instructions.",
-      email: email,
+        "If an account exists with this email, a password reset link has been sent",
     });
   } catch (error) {
     console.error("Forgot password error:", error);
     res.status(500).json({
       success: false,
-      message: "An internal error occurred. Please try again later.",
+      message: "Internal server error",
     });
   }
 });
 
 /**
- * Verify password reset token endpoint - FIXED VERSION
- */
-app.post("/verifyResetToken", async (req, res) => {
-  try {
-    const { token } = req.body;
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: "Reset token is required",
-      });
-    }
-
-    console.log("Verifying reset token...");
-
-    // Verify the session token directly with Supabase
-    const {
-      data: { user },
-      error,
-    } = await supabase.supabase.auth.getUser(token);
-
-    if (error || !user) {
-      console.error("Token verification error:", error);
-      return res.status(400).json({
-        success: false,
-        message: "Invalid or expired reset token",
-      });
-    }
-
-    // Get user profile for additional info
-    const { data: profile, error: profileError } = await supabase.supabase
-      .from("profiles")
-      .select("email, first_name, last_name")
-      .eq("id", user.id)
-      .single();
-
-    const userEmail = profile?.email || user.email;
-
-    console.log("Token verified successfully for:", userEmail);
-
-    res.json({
-      success: true,
-      message: "Reset token is valid",
-      email: userEmail,
-      user: {
-        id: user.id,
-        email: userEmail,
-      },
-    });
-  } catch (error) {
-    console.error("Verify reset token error:", error);
-    res.status(500).json({
-      success: false,
-      message: "An error occurred while verifying the reset token",
-    });
-  }
-});
-
-/**
- * Password reset endpoint - FIXED VERSION
+ * Reset password endpoint
  */
 app.post("/resetPassword", async (req, res) => {
   try {
-    const { token, new_password } = req.body;
+    const { token, password } = req.body;
 
-    console.log("=== Password Reset Debug ===");
-    console.log("Token received:", token ? "Present" : "Missing");
-    console.log("Token length:", token ? token.length : 0);
-    console.log("Password received:", new_password ? "Present" : "Missing");
-
-    if (!token || !new_password) {
+    if (!token || !password) {
       return res.status(400).json({
         success: false,
-        message: "Access token and new password are required",
+        message: "Token and new password are required",
       });
     }
 
-    if (new_password.length < 8) {
+    // Validate password strength
+    if (password.length < 6) {
       return res.status(400).json({
         success: false,
-        message: "Password must be at least 8 characters long",
+        message: "Password must be at least 6 characters long",
       });
     }
 
-    console.log("Attempting password reset...");
+    const { data, error } = await supabase.supabase.auth.updateUser({
+      password: password,
+    });
 
-    // First verify the token is valid by getting the user
-    const {
-      data: { user },
-      error: getUserError,
-    } = await supabase.supabase.auth.getUser(token);
-
-    if (getUserError || !user) {
-      console.error("Token validation failed:", getUserError);
+    if (error) {
+      console.error("Reset password error:", error);
       return res.status(400).json({
         success: false,
-        message: "Invalid or expired token",
+        message: error.message || "Failed to reset password",
       });
     }
 
-    console.log("Token valid for user:", user.email);
-
-    // Make direct API call to Supabase to update password
-    const supabaseUrl =
-      process.env.SUPABASE_URL || "https://oplzcugljytvywvewdkj.supabase.co";
-    const supabaseAnonKey =
-      process.env.SUPABASE_ANON_KEY || supabase.supabase.supabaseKey;
-
-    try {
-      const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-          apikey: supabaseAnonKey,
-        },
-        body: JSON.stringify({
-          password: new_password,
-        }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        console.error("Password update error via API:", result);
-        return res.status(400).json({
-          success: false,
-          message: result.message || "Failed to update password",
-        });
-      }
-
-      console.log("Password updated successfully for user:", user.email);
-
-      res.json({
-        success: true,
-        message:
-          "Password reset successfully. You can now login with your new password.",
-        user: {
-          id: user.id,
-          email: user.email,
-        },
-      });
-    } catch (fetchError) {
-      console.error("Fetch error:", fetchError);
-      return res.status(500).json({
-        success: false,
-        message: "Failed to communicate with authentication service",
-      });
-    }
+    res.json({
+      success: true,
+      message: "Password reset successfully",
+      user: data.user,
+    });
   } catch (error) {
     console.error("Reset password error:", error);
     res.status(500).json({
       success: false,
-      message: "An error occurred while resetting the password",
-    });
-  }
-});
-
-// ==================== AUTHENTICATED ROUTES ====================
-
-/**
- * Get logged in user info
- */
-app.get("/getLoggedIn", authenticateToken, async (req, res) => {
-  try {
-    // User is already verified by authenticateToken middleware
-    const userId = req.user.id;
-
-    // First get the authenticated user's email
-    const { data: authProfile, error: authError } = await supabase.supabase
-      .from("profiles")
-      .select("email")
-      .eq("id", userId)
-      .limit(1)
-      .single();
-
-    if (authError || !authProfile) {
-      console.error("Auth profile fetch error:", authError);
-      return res.status(404).json({
-        success: false,
-        message: "User profile not found",
-      });
-    }
-
-    // Get all profiles with the same email (multiple church profiles)
-    const { data: profiles, error: profileError } = await supabase.supabase
-      .from("profiles")
-      .select("*")
-      .eq("email", authProfile.email)
-      .order("portal_id", { ascending: true });
-
-    if (profileError) {
-      console.error("Profiles fetch error:", profileError);
-      return res.status(500).json({
-        success: false,
-        message: "Failed to fetch user profiles",
-      });
-    }
-
-    if (!profiles || profiles.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No profiles found",
-      });
-    }
-
-    // Fetch profile images for each profile
-    const profilesWithImages = await Promise.all(
-      profiles.map(async (profile) => {
-        let profileImageUrl = null;
-
-        try {
-          const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${profile.portal_id}`
-          );
-
-          if (imageResponse.ok) {
-            const imageBuffer = await imageResponse.arrayBuffer();
-            const base64Image = Buffer.from(imageBuffer).toString("base64");
-            profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type"
-            )};base64,${base64Image}`;
-          }
-        } catch (imageError) {
-          console.warn(
-            `Failed to fetch image for portal_id ${profile.portal_id}:`,
-            imageError.message
-          );
-        }
-
-        return {
-          id: profile.id,
-          portal_id: profile.portal_id,
-          first_name: profile.first_name || "",
-          last_name: profile.last_name || "",
-          email: profile.email,
-          cellphone: profile.cellphone,
-          family_id: profile.family_id,
-          family_role: profile.family_role,
-          profile_pic: profileImageUrl,
-        };
-      })
-    );
-
-    // Return consistent response format
-    res.json({
-      success: true,
-      user: profilesWithImages[0], // Primary profile
-      users: profilesWithImages, // All profiles
-      data: {
-        user: profilesWithImages[0],
-        users: profilesWithImages,
-        count: profilesWithImages.length,
-      },
-    });
-  } catch (error) {
-    console.error("Get logged in user error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to get user information",
+      message: "Internal server error",
     });
   }
 });
@@ -688,7 +496,10 @@ app.post("/logout", authenticateToken, async (req, res) => {
 
     if (error) {
       console.error("Logout error:", error);
-      // Don't fail the logout on client side even if server logout fails
+      return res.status(400).json({
+        success: false,
+        message: error.message || "Failed to logout",
+      });
     }
 
     res.json({
@@ -697,208 +508,49 @@ app.post("/logout", authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error("Logout error:", error);
-    // Still return success for client-side cleanup
-    res.json({
-      success: true,
-      message: "Logged out successfully",
+    res.status(500).json({
+      success: false,
+      message: "Internal server error during logout",
     });
   }
 });
 
 /**
- * Get all users
+ * Update user profile
  */
-app.get("/getUsers", async (req, res) => {
+app.put("/updateUser/:userId", authenticateToken, async (req, res) => {
   try {
-    const { data, error } = await supabase.supabase
-      .from("profiles")
-      .select("*")
-      .order("portal_id", { ascending: false });
-
-    if (error) {
-      console.error("Get users error:", error);
-      return res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-
-    res.send(data);
-  } catch (error) {
-    console.error("Get users error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch users",
-    });
-  }
-});
-
-app.get("/getAuthEmails", async (req, res) => {
-  try {
-    const perPage = 1000;
-    let page = 1;
-    const { data, error } = await supabase.supabase.auth.admin.listUsers({
-      page,
-      perPage,
-    });
-
-    if (error) {
-      console.error("Get users error:", error);
-      return res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-
-    res.send(data.users);
-  } catch (error) {
-    console.error("Get users error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch users",
-    });
-  }
-});
-
-app.get("/getUserEmails", async (req, res) => {
-  try {
-    const { data, error } = await supabase.supabase.rpc("get_all_user_emails");
-
-    if (error) {
-      console.error("Get users error:", error);
-      return res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-
-    // Extract just the email strings from the array of objects
-    const emailStrings = data.map((item) => item.email);
-    res.send(emailStrings);
-  } catch (error) {
-    console.error("Get users error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch users",
-    });
-  }
-});
-
-/**
- * Get user by ID
- */
-app.get("/getUserById/:id", authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: "User ID is required",
-      });
-    }
-
-    console.log("Getting user by ID:", id);
-
-    // Try the RPC function first
-    const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
-      "get_user_roles_and_services",
-      { p_user_id: id }
-    );
-
-    if (!rpcError && rpcData && rpcData.length > 0) {
-      return res.json({
-        success: true,
-        data: rpcData,
-      });
-    }
-
-    // Fallback to simple profile fetch
-    const { data: profile, error: profileError } = await supabase.supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", id)
-      .single();
-
-    if (profileError) {
-      console.error("Get user by ID error:", profileError);
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      data: [profile],
-    });
-  } catch (error) {
-    console.error("Get user by ID error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch user",
-    });
-  }
-});
-
-/**
- * Get user by portal ID
- */
-app.get("/getUserByPortal/:portal_id", async (req, res) => {
-  try {
-    const { portal_id } = req.params;
-    const cleanPortalId = String(portal_id).trim();
-
-    const { data: profile, error } = await supabase.supabase
-      .from("profiles")
-      .select("*")
-      .eq("portal_id", cleanPortalId)
-      .single();
-
-    if (error) {
-      console.error("Get user by portal ID error:", error);
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      data: profile,
-    });
-  } catch (error) {
-    console.error("Get user by portal ID error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch user",
-    });
-  }
-});
-
-/**
- * Update user
- */
-app.post("/updateUser/:portal_id", authenticateToken, async (req, res) => {
-  try {
-    const { portal_id } = req.params;
-    const { first_name, last_name, dob, cellphone, email } = req.body;
-
-    const updateData = {
+    const { userId } = req.params;
+    const {
       first_name,
       last_name,
+      dob,
       cellphone,
-      email,
+      portal_id,
+      family_id,
+      family_role,
+    } = req.body;
+
+    const updates = {
+      first_name,
+      last_name,
+      dob: dob ? new Date(dob) : null,
+      cellphone,
+      portal_id,
+      family_id,
+      family_role,
+      updated_at: new Date().toISOString(),
     };
 
-    if (dob) {
-      updateData.dob = new Date(dob);
-    }
+    // Remove undefined fields
+    Object.keys(updates).forEach((key) =>
+      updates[key] === undefined ? delete updates[key] : {}
+    );
 
     const { data, error } = await supabase.supabase
       .from("profiles")
-      .update(updateData)
-      .eq("portal_id", portal_id)
+      .update(updates)
+      .eq("id", userId)
       .select()
       .single();
 
