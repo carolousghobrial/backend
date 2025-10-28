@@ -586,7 +586,7 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
     // First get the authenticated user's email
     const { data: authProfile, error: authError } = await supabase.supabase
       .from("profiles")
-      .select("email")
+      .select("*")
       .eq("id", userId)
       .limit(1)
       .single();
@@ -600,12 +600,13 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
     }
 
     // Get all profiles with the same email (multiple church profiles)
-    const { data: profiles, error: profileError } = await supabase.supabase
-      .from("profiles")
-      .select("*")
-      .eq("email", authProfile.email)
-      .order("portal_id", { ascending: true });
-
+    const { data: profiles, error: profileError } = await supabase.supabase.rpc(
+      "get_family_children",
+      {
+        portal_id_in: authProfile.portal_id,
+      }
+    );
+    console.log(profiles);
     if (profileError) {
       console.error("Profiles fetch error:", profileError);
       return res.status(500).json({
@@ -658,7 +659,7 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
         };
       })
     );
-
+    console.log(profilesWithImages);
     // Return consistent response format
     res.json({
       success: true,
@@ -678,7 +679,281 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
     });
   }
 });
+// ==================== BACKEND SOLUTION ====================
+// File: routes/users.js or similar
 
+/**
+ * Get parent's children (for parent user switching)
+ * Parents can only view children under 18 years old
+ */
+app.get("/getParentChildren", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Get the authenticated parent's profile
+    const { data: authProfile, error: authError } = await supabase.supabase
+      .from("profiles")
+      .select("email, family_id, family_role")
+      .eq("id", userId)
+      .limit(1)
+      .single();
+
+    if (authError || !authProfile) {
+      console.error("Auth profile fetch error:", authError);
+      return res.status(404).json({
+        success: false,
+        message: "Parent profile not found",
+      });
+    }
+
+    // Verify user is a parent
+    const isParent = authProfile.family_role === "PARENT";
+    if (!isParent) {
+      return res.status(403).json({
+        success: false,
+        message: "Only parents can view their children",
+      });
+    }
+
+    // Get all profiles with same family_id (children and parent)
+    const { data: familyProfiles, error: familyError } = await supabase.supabase
+      .from("profiles")
+      .select("*")
+      .eq("family_id", authProfile.family_id)
+      .order("family_role", { ascending: true });
+
+    if (familyError) {
+      console.error("Family profiles fetch error:", familyError);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch family profiles",
+      });
+    }
+
+    if (!familyProfiles || familyProfiles.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No family profiles found",
+      });
+    }
+
+    // ========== CRITICAL: Filter children under 18 ==========
+    const childrenUnder18 = familyProfiles.filter((profile) => {
+      // Check if it's a child (not parent)
+      const isChild =
+        profile.family_role && profile.family_role.toLowerCase() !== "parent";
+
+      if (!isChild) return false;
+
+      // Calculate age from DOB
+      if (profile.dob) {
+        const birthDate = new Date(profile.dob);
+        const today = new Date();
+        let age = today.getFullYear() - birthDate.getFullYear();
+        const monthDiff = today.getMonth() - birthDate.getMonth();
+
+        if (
+          monthDiff < 0 ||
+          (monthDiff === 0 && today.getDate() < birthDate.getDate())
+        ) {
+          age--;
+        }
+
+        // Only include children under 18
+        return age < 18;
+      }
+
+      // If no DOB, include by default (safer approach)
+      return true;
+    });
+
+    // Fetch profile images for each child
+    const childrenWithImages = await Promise.all(
+      childrenUnder18.map(async (child) => {
+        let profileImageUrl = null;
+
+        try {
+          const imageResponse = await fetch(
+            `https://api.suscopts.org/image/${child.portal_id}`
+          );
+
+          if (imageResponse.ok) {
+            const imageBuffer = await imageResponse.arrayBuffer();
+            const base64Image = Buffer.from(imageBuffer).toString("base64");
+            profileImageUrl = `data:${imageResponse.headers.get(
+              "content-type"
+            )};base64,${base64Image}`;
+          }
+        } catch (imageError) {
+          console.warn(
+            `Failed to fetch image for portal_id ${child.portal_id}:`,
+            imageError.message
+          );
+        }
+
+        // Calculate child's age for display
+        let childAge = null;
+        if (child.dob) {
+          const birthDate = new Date(child.dob);
+          const today = new Date();
+          childAge = today.getFullYear() - birthDate.getFullYear();
+          const monthDiff = today.getMonth() - birthDate.getMonth();
+
+          if (
+            monthDiff < 0 ||
+            (monthDiff === 0 && today.getDate() < birthDate.getDate())
+          ) {
+            childAge--;
+          }
+        }
+
+        return {
+          id: child.id,
+          portal_id: child.portal_id,
+          first_name: child.first_name || "",
+          last_name: child.last_name || "",
+          email: child.email,
+          cellphone: child.cellphone,
+          family_id: child.family_id,
+          family_role: child.family_role,
+          dob: child.dob,
+          age: childAge, // Add age for display
+          profile_pic: profileImageUrl,
+        };
+      })
+    );
+
+    // Log for debugging
+    console.log(
+      `✅ Found ${childrenWithImages.length} children under 18 for parent ${authProfile.email}`
+    );
+
+    // Return response
+    res.json({
+      success: true,
+      data: {
+        children: childrenWithImages,
+        count: childrenWithImages.length,
+        parentEmail: authProfile.email,
+        familyId: authProfile.family_id,
+      },
+    });
+  } catch (error) {
+    console.error("Get parent children error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get children information",
+    });
+  }
+});
+
+/**
+ * Verify parent-child relationship before switching
+ * This is important for security - verify the parent owns the child
+ */
+app.post("/verifyParentChild", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { childPortalId } = req.body;
+
+    if (!childPortalId) {
+      return res.status(400).json({
+        success: false,
+        message: "childPortalId is required",
+      });
+    }
+
+    // Get parent's profile
+    const { data: parentProfile, error: parentError } = await supabase.supabase
+      .from("profiles")
+      .select("family_id, family_role, email")
+      .eq("id", userId)
+      .limit(1)
+      .single();
+
+    if (parentError || !parentProfile) {
+      return res.status(404).json({
+        success: false,
+        message: "Parent profile not found",
+      });
+    }
+
+    // Verify parent
+    if (parentProfile.family_role !== "PARENT") {
+      return res.status(403).json({
+        success: false,
+        message: "User is not a parent",
+      });
+    }
+
+    // Get child's profile
+    const { data: childProfile, error: childError } = await supabase.supabase
+      .from("profiles")
+      .select("family_id, family_role, dob, first_name, last_name")
+      .eq("portal_id", childPortalId)
+      .limit(1)
+      .single();
+
+    if (childError || !childProfile) {
+      return res.status(404).json({
+        success: false,
+        message: "Child profile not found",
+      });
+    }
+
+    // Verify parent and child share same family_id
+    if (parentProfile.family_id !== childProfile.family_id) {
+      return res.status(403).json({
+        success: false,
+        message: "Parent-child relationship not verified",
+      });
+    }
+
+    // Verify child is under 18
+    let childAge = null;
+    if (childProfile.dob) {
+      const birthDate = new Date(childProfile.dob);
+      const today = new Date();
+      childAge = today.getFullYear() - birthDate.getFullYear();
+      const monthDiff = today.getMonth() - birthDate.getMonth();
+
+      if (
+        monthDiff < 0 ||
+        (monthDiff === 0 && today.getDate() < birthDate.getDate())
+      ) {
+        childAge--;
+      }
+    }
+
+    if (childAge !== null && childAge >= 18) {
+      return res.status(403).json({
+        success: false,
+        message: "Child is 18 or older. Parent cannot switch to this child.",
+      });
+    }
+
+    // Verification successful
+    console.log(
+      `✅ Parent ${parentProfile.email} verified as parent of ${childProfile.first_name} ${childProfile.last_name}`
+    );
+
+    res.json({
+      success: true,
+      data: {
+        verified: true,
+        childName: `${childProfile.first_name} ${childProfile.last_name}`,
+        childAge: childAge,
+        parentEmail: parentProfile.email,
+      },
+    });
+  } catch (error) {
+    console.error("Verify parent-child error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to verify parent-child relationship",
+    });
+  }
+});
 /**
  * Logout endpoint
  */
