@@ -588,9 +588,7 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
     const { data: authProfile, error: authError } = await supabase.supabase
       .from("profiles")
       .select("*")
-      .eq("id", userId)
-      .limit(1)
-      .single();
+      .eq("id", userId);
 
     if (authError || !authProfile) {
       console.error("Auth profile fetch error:", authError);
@@ -599,15 +597,14 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
         message: "User profile not found",
       });
     }
-
+    const portal_ids = authProfile.map((profile) => profile.portal_id);
     // Get all profiles with the same email (multiple church profiles)
     const { data: profiles, error: profileError } = await supabase.supabase.rpc(
       "get_family_children",
       {
-        portal_id_in: authProfile.portal_id,
+        portal_id_in: portal_ids,
       }
     );
-    console.log(profiles);
     if (profileError) {
       console.error("Profiles fetch error:", profileError);
       return res.status(500).json({
