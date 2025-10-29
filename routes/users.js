@@ -175,6 +175,7 @@ app.post("/login", async (req, res) => {
     const responseData = {
       success: true,
       token: authData.session.access_token,
+      refresh_token: authData.session.refresh_token, // Add this line
       user: profile || {
         id: authData.user.id,
         email: authData.user.email,
@@ -676,6 +677,58 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to get user information",
+    });
+  }
+});
+/**
+ * Refresh access token
+ */
+app.post("/refreshToken", async (req, res) => {
+  try {
+    const { refresh_token } = req.body;
+
+    if (!refresh_token) {
+      return res.status(400).json({
+        success: false,
+        message: "Refresh token is required",
+      });
+    }
+
+    console.log("Refreshing token...");
+
+    // Refresh the session using Supabase
+    const { data, error } = await supabase.supabase.auth.refreshSession({
+      refresh_token: refresh_token,
+    });
+
+    if (error) {
+      console.error("Token refresh error:", error);
+      return res.status(401).json({
+        success: false,
+        message: "Failed to refresh token",
+      });
+    }
+
+    if (!data.session) {
+      return res.status(401).json({
+        success: false,
+        message: "No session returned",
+      });
+    }
+
+    console.log("Token refreshed successfully");
+
+    res.json({
+      success: true,
+      token: data.session.access_token,
+      refresh_token: data.session.refresh_token,
+      session: data.session,
+    });
+  } catch (error) {
+    console.error("Refresh token error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error during token refresh",
     });
   }
 });

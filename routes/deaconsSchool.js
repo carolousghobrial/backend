@@ -472,7 +472,491 @@ app.get("/getdeaconsschoolextrasbycourse/:course_id", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+// Example using Express.js and PostgreSQL
+// Behavior Report Endpoint - Add this to your routes file
 
+// Behavior Report Endpoint - Add this to your routes file
+
+/**
+ * GET /getBehaviorReport
+ * Query parameters: start_date, end_date, course_id (optional)
+ * Returns behavior records with student and session information
+ */
+app.get("/getBehaviorReport", async (req, res) => {
+  try {
+    const { start_date, end_date, course_id } = req.query;
+
+    // Validate required parameters
+    if (!start_date || !end_date) {
+      return res.status(400).json({
+        success: false,
+        error: "start_date and end_date are required",
+      });
+    }
+
+    console.log("Fetching behavior report:", {
+      start_date,
+      end_date,
+      course_id,
+    });
+
+    // Build the query
+    let query = supabase.supabase
+      .from("ds_attendance")
+      .select(
+        `
+        *,
+        users:student_id (
+          id,
+          portal_id,
+          first_name,
+          last_name,
+          email
+        ),
+        ds_class_sessions:session_id (
+          session_id,
+          course_id,
+          session_date,
+          topic,
+          notes,
+          ds_courses:course_id (
+            course_id,
+            class_name
+          )
+        )
+      `
+      )
+      .eq("present", true) // Only get records where student was present
+      .gte("ds_class_sessions.session_date", start_date)
+      .lte("ds_class_sessions.session_date", end_date);
+
+    // Add course filter if provided
+    if (course_id) {
+      query = query.eq("ds_class_sessions.course_id", course_id);
+    }
+
+    // Order by date descending, then by student name
+    query = query.order("ds_class_sessions(session_date)", {
+      ascending: false,
+    });
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("Error fetching behavior records:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    console.log(`Found ${data?.length || 0} behavior records`);
+
+    // Transform data to match expected format
+    const behaviorRecords = data.map((record) => ({
+      attendance_id: record.attendance_id,
+      student_id: record.student_id,
+      session_id: record.session_id,
+      present: record.present,
+      good_behavior: record.good_behavior,
+      notes: record.notes,
+      recorded_by: record.recorded_by,
+      recorded_at: record.recorded_at,
+      updated_at: record.updated_at,
+      course_id: record.ds_class_sessions?.course_id || null,
+      session_date: record.ds_class_sessions?.session_date || null,
+      session_topic: record.ds_class_sessions?.topic || null,
+      session_notes: record.ds_class_sessions?.notes || null,
+      course_name: record.ds_class_sessions?.ds_courses?.class_name || null,
+      student: record.users
+        ? {
+            id: record.users.id,
+            portal_id: record.users.portal_id,
+            first_name: record.users.first_name,
+            last_name: record.users.last_name,
+            email: record.users.email,
+            profile_pic: record.users.profile_pic,
+          }
+        : null,
+    }));
+
+    res.json({
+      success: true,
+      data: behaviorRecords,
+      count: behaviorRecords.length,
+      filters: {
+        start_date,
+        end_date,
+        course_id: course_id || "all",
+      },
+    });
+  } catch (error) {
+    console.error("Get behavior report error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * Alternative version with better filtering using join conditions
+ * This version might work better if the above filtering doesn't work as expected
+ */
+app.get("/getBehaviorReportAlt", async (req, res) => {
+  try {
+    const { start_date, end_date, course_id } = req.query;
+
+    if (!start_date || !end_date) {
+      return res.status(400).json({
+        success: false,
+        error: "start_date and end_date are required",
+      });
+    }
+
+    console.log("Fetching behavior report (alt):", {
+      start_date,
+      end_date,
+      course_id,
+    });
+
+    // First, get sessions in the date range
+    let sessionQuery = supabase.supabase
+      .from("ds_class_sessions")
+      .select("session_id, course_id, session_date, topic, notes")
+      .gte("session_date", start_date)
+      .lte("session_date", end_date);
+
+    if (course_id) {
+      sessionQuery = sessionQuery.eq("course_id", course_id);
+    }
+
+    const { data: sessions, error: sessionError } = await sessionQuery;
+
+    if (sessionError) {
+      console.error("Error fetching sessions:", sessionError);
+      return res.status(500).json({
+        success: false,
+        error: sessionError.message,
+      });
+    }
+
+    if (!sessions || sessions.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        count: 0,
+        filters: { start_date, end_date, course_id: course_id || "all" },
+      });
+    }
+
+    // Get session IDs
+    const sessionIds = sessions.map((s) => s.session_id);
+
+    // Now get attendance records for these sessions
+    const { data: attendanceData, error: attendanceError } =
+      await supabase.supabase
+        .from("ds_attendance")
+        .select(
+          `
+        *,
+        users:student_id (
+          id,
+          portal_id,
+          first_name,
+          last_name,
+          email
+        )
+      `
+        )
+        .in("session_id", sessionIds)
+        .eq("present", true)
+        .order("created_at", { ascending: false });
+
+    if (attendanceError) {
+      console.error("Error fetching attendance records:", attendanceError);
+      return res.status(500).json({
+        success: false,
+        error: attendanceError.message,
+      });
+    }
+
+    // Get course information
+    const courseIds = [...new Set(sessions.map((s) => s.course_id))];
+    const { data: courses, error: courseError } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id, class_name")
+      .in("course_id", courseIds);
+
+    if (courseError) {
+      console.error("Error fetching courses:", courseError);
+    }
+
+    // Create lookup maps
+    const sessionMap = new Map(sessions.map((s) => [s.session_id, s]));
+    const courseMap = new Map((courses || []).map((c) => [c.course_id, c]));
+
+    // Transform and combine data
+    const behaviorRecords = attendanceData.map((record) => {
+      const session = sessionMap.get(record.session_id);
+      const course = session ? courseMap.get(session.course_id) : null;
+
+      return {
+        attendance_id: record.attendance_id,
+        student_id: record.student_id,
+        session_id: record.session_id,
+        present: record.present,
+        good_behavior: record.good_behavior,
+        notes: record.notes,
+        recorded_by: record.recorded_by,
+        recorded_at: record.recorded_at,
+        updated_at: record.updated_at,
+        course_id: session?.course_id || null,
+        session_date: session?.session_date || null,
+        session_topic: session?.topic || null,
+        session_notes: session?.notes || null,
+        course_name: course?.class_name || null,
+        student: record.users
+          ? {
+              id: record.users.id,
+              portal_id: record.users.portal_id,
+              first_name: record.users.first_name,
+              last_name: record.users.last_name,
+              email: record.users.email,
+            }
+          : null,
+      };
+    });
+
+    // Sort by session date (newest first), then by student name
+    behaviorRecords.sort((a, b) => {
+      const dateCompare = new Date(b.session_date) - new Date(a.session_date);
+      if (dateCompare !== 0) return dateCompare;
+
+      const aName = `${a.student?.last_name || ""} ${
+        a.student?.first_name || ""
+      }`;
+      const bName = `${b.student?.last_name || ""} ${
+        b.student?.first_name || ""
+      }`;
+      return aName.localeCompare(bName);
+    });
+
+    console.log(`Found ${behaviorRecords.length} behavior records`);
+
+    res.json({
+      success: true,
+      data: behaviorRecords,
+      count: behaviorRecords.length,
+      filters: {
+        start_date,
+        end_date,
+        course_id: course_id || "all",
+      },
+    });
+  } catch (error) {
+    console.error("Get behavior report error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * GET /getBehaviorReportByCourse/:course_id
+ * Get all behavior records for a specific course (no date filter)
+ */
+app.get("/getBehaviorRecordByCourse/:course_id", async (req, res) => {
+  try {
+    const { course_id } = req.params;
+
+    if (!course_id) {
+      return res.status(400).json({
+        success: false,
+        error: "course_id ID is required",
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_attendance")
+      .select(
+        `
+        *,
+        users:student_id (
+          id,
+          first_name,
+          last_name,
+          email
+        ),
+        ds_class_sessions:session_id (
+          session_id,
+          course_id,
+          session_date,
+          topic
+        )
+      `
+      )
+      .eq("course_id", course_id)
+      .order("users(first_name)", { ascending: true });
+    console.log(data);
+    if (error) {
+      console.error("Error fetching attendance records:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    // Transform data to match AttendanceRecord class
+    const attendanceRecords = data.map((record) => ({
+      student_id: record.student_id,
+      session_id: record.session_id,
+      present: record.present,
+      good_behavior: record.good_behavior,
+      notes: record.notes,
+      recorded_by: record.recorded_by,
+      recorded_at: record.recorded_at,
+      updated_at: record.updated_at,
+      student: record.users
+        ? {
+            id: record.users.id,
+            first_name: record.users.first_name,
+            last_name: record.users.last_name,
+            email: record.users.email,
+          }
+        : null,
+      session: record.ds_class_sessions
+        ? {
+            session_id: record.ds_class_sessions.session_id,
+            course_id: record.ds_class_sessions.course_id,
+            session_date: record.ds_class_sessions.session_date,
+            topic: record.ds_class_sessions.topic,
+          }
+        : null,
+    }));
+
+    res.send(attendanceRecords);
+  } catch (error) {
+    console.error("Get attendance by session error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
+
+/**
+ * GET /getStudentBehaviorHistory/:student_id
+ * Get behavior history for a specific student
+ */
+app.get("/getStudentBehaviorHistory/:student_id", async (req, res) => {
+  try {
+    const { student_id } = req.params;
+    const { start_date, end_date, course_id } = req.query;
+
+    if (!student_id) {
+      return res.status(400).json({
+        success: false,
+        error: "student_id is required",
+      });
+    }
+
+    console.log("Fetching behavior history for student:", student_id);
+
+    let query = supabase.supabase
+      .from("ds_attendance")
+      .select(
+        `
+        *,
+        ds_class_sessions:session_id (
+          session_id,
+          course_id,
+          session_date,
+          topic,
+          ds_courses:course_id (
+            course_id,
+            class_name
+          )
+        )
+      `
+      )
+      .eq("student_id", student_id)
+      .eq("present", true);
+
+    if (start_date && end_date) {
+      query = query
+        .gte("ds_class_sessions.session_date", start_date)
+        .lte("ds_class_sessions.session_date", end_date);
+    }
+
+    if (course_id) {
+      query = query.eq("ds_class_sessions.course_id", course_id);
+    }
+
+    query = query.order("ds_class_sessions(session_date)", {
+      ascending: false,
+    });
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("Error fetching student behavior history:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    const behaviorHistory = data.map((record) => ({
+      attendance_id: record.attendance_id,
+      session_id: record.session_id,
+      good_behavior: record.good_behavior,
+      notes: record.notes,
+      session_date: record.ds_class_sessions?.session_date || null,
+      session_topic: record.ds_class_sessions?.topic || null,
+      course_id: record.ds_class_sessions?.course_id || null,
+      course_name: record.ds_class_sessions?.ds_courses?.class_name || null,
+      recorded_at: record.recorded_at,
+    }));
+
+    // Calculate statistics
+    const totalRecords = behaviorHistory.length;
+    const goodBehaviorCount = behaviorHistory.filter(
+      (r) => r.good_behavior === true
+    ).length;
+    const badBehaviorCount = behaviorHistory.filter(
+      (r) => r.good_behavior === false
+    ).length;
+    const goodPercentage =
+      totalRecords > 0
+        ? Math.round((goodBehaviorCount / totalRecords) * 100)
+        : 0;
+
+    res.json({
+      success: true,
+      data: {
+        student_id,
+        records: behaviorHistory,
+        statistics: {
+          total_records: totalRecords,
+          good_behavior: goodBehaviorCount,
+          bad_behavior: badBehaviorCount,
+          good_percentage: goodPercentage,
+        },
+      },
+      count: totalRecords,
+    });
+  } catch (error) {
+    console.error("Get student behavior history error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
 app.post("/addDSCalendarForLevel/:level", async (req, res) => {
   try {
     const level = req.params.level;
