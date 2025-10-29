@@ -2499,6 +2499,7 @@ app.get("/getCalendarByCourse/:course_id", async (req, res) => {
 });
 app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
   const { course_id } = req.params;
+  console.log(course_id);
   try {
     const { data, error } = await supabase.supabase.rpc(
       "get_current_week_calendar_by_course",
@@ -2506,6 +2507,7 @@ app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
         p_course_id: course_id,
       }
     );
+    console.log(data);
     const uniqueData = Array.from(
       new Map(data.map((item) => [item.content_id, item])).values()
     );
