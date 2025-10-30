@@ -254,7 +254,6 @@ app.get("/getHymn/:id", async (req, res) => {
 });
 app.get("/getRitualsByLevel/:level", async (req, res) => {
   const level = req.params.level;
-  console.log(level);
   let { data: data, error } = await supabase.supabase
     .from("deacons_school_rituals")
     .select("*")
@@ -2970,7 +2969,7 @@ app.get("/getStudentGrades/:studentId/:courseId/", async (req, res) => {
       console.error("Error fetching student grades:", error);
       return res.status(500).json({ success: false, error: error.message });
     }
-
+    console.log(data);
     res.json({ success: true, data: data || null });
   } catch (err) {
     console.error("Unexpected error:", err);
