@@ -1207,13 +1207,15 @@ app.get("/getUserByPortal/:portal_id", async (req, res) => {
 app.post("/updateUser/:portal_id", authenticateToken, async (req, res) => {
   try {
     const { portal_id } = req.params;
-    const { first_name, last_name, dob, cellphone, email } = req.body;
+    const { first_name, last_name, dob, cellphone, email, shirt_size } =
+      req.body;
 
     const updateData = {
       first_name,
       last_name,
       cellphone,
       email,
+      shirt_size, // ADD THIS LINE
     };
 
     if (dob) {
