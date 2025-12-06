@@ -1201,9 +1201,6 @@ app.get("/getUserByPortal/:portal_id", async (req, res) => {
   }
 });
 
-/**
- * Update user
- */
 app.post("/updateUser/:portal_id", authenticateToken, async (req, res) => {
   try {
     const { portal_id } = req.params;
