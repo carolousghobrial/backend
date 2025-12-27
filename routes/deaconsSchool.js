@@ -3180,10 +3180,14 @@ app.delete("/deleteAssessmentItem/:itemId", async (req, res) => {
 });
 
 // Update assessment item
+// Update assessment item
 app.put("/updateAssessmentItem/:itemId", async (req, res) => {
   try {
     const { itemId } = req.params;
     const updates = req.body;
+
+    console.log("Updating assessment item:", itemId);
+    console.log("Updates:", updates);
 
     if (!itemId) {
       return res.status(400).json({
@@ -3192,6 +3196,28 @@ app.put("/updateAssessmentItem/:itemId", async (req, res) => {
       });
     }
 
+    // First check if the item exists
+    const { data: existingItem, error: checkError } = await supabase.supabase
+      .from("ds_assessment_items")
+      .select("item_id")
+      .eq("item_id", itemId)
+      .maybeSingle();
+
+    if (checkError) {
+      console.error("Error checking item existence:", checkError);
+      return res
+        .status(500)
+        .json({ success: false, error: checkError.message });
+    }
+
+    if (!existingItem) {
+      return res.status(404).json({
+        success: false,
+        error: `Assessment item with ID ${itemId} not found`,
+      });
+    }
+
+    // Now perform the update
     const { data, error } = await supabase.supabase
       .from("ds_assessment_items")
       .update({
@@ -3199,8 +3225,7 @@ app.put("/updateAssessmentItem/:itemId", async (req, res) => {
         updated_at: new Date().toISOString(),
       })
       .eq("item_id", itemId)
-      .select()
-      .single();
+      .select();
 
     if (error) {
       console.error("Error updating assessment item:", error);
@@ -3210,7 +3235,7 @@ app.put("/updateAssessmentItem/:itemId", async (req, res) => {
     res.json({
       success: true,
       message: "Assessment item updated successfully",
-      data,
+      data: data[0], // Return first item from array
     });
   } catch (err) {
     console.error("Unexpected error:", err);
