@@ -121,6 +121,102 @@ app.get("/", async (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+/**
+ * Send OTP to phone number
+ */
+app.post("/login/phone/send-otp", async (req, res) => {
+  try {
+    const { phone } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone number is required",
+      });
+    }
+
+    // Send OTP via Supabase
+    const { data, error } = await supabase.supabase.auth.signInWithOtp({
+      phone,
+      options: {
+        shouldCreateUser: false,
+      },
+    });
+
+    if (error) {
+      console.error("Send OTP error:", error);
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "OTP sent to phone number",
+    });
+  } catch (error) {
+    console.error("Send OTP error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to send OTP",
+    });
+  }
+});
+/**
+ * Verify phone OTP and login
+ */
+app.post("/login/phone/verify-otp", async (req, res) => {
+  try {
+    const { phone, token } = req.body;
+
+    if (!phone || !token) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone and OTP token are required",
+      });
+    }
+
+    const { data, error } = await supabase.supabase.auth.verifyOtp({
+      phone,
+      token,
+      type: "sms",
+    });
+
+    if (error || !data.session || !data.user) {
+      console.error("Verify OTP error:", error);
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired OTP",
+      });
+    }
+
+    // Fetch profile (same pattern as email login)
+    const { data: profile } = await supabase.supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", data.user.id)
+      .single();
+
+    res.json({
+      success: true,
+      token: data.session.access_token,
+      refresh_token: data.session.refresh_token,
+      user: profile || {
+        id: data.user.id,
+        phone: data.user.phone,
+        ...data.user.user_metadata,
+      },
+      session: data.session,
+    });
+  } catch (error) {
+    console.error("Verify OTP error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Phone login failed",
+    });
+  }
+});
 
 /**
  * Login endpoint
@@ -350,7 +446,7 @@ app.post("/forgotPassword", rateLimitPasswordReset, async (req, res) => {
       normalizedEmail,
       {
         redirectTo: redirectUrl,
-      }
+      },
     );
 
     if (error) {
@@ -601,7 +697,7 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
 
     const { data: profiles, error: profileError } = await supabase.supabase.rpc(
       "get_family_children",
-      { portal_id_in: portal_ids }
+      { portal_id_in: portal_ids },
     );
 
     if (profileError) {
@@ -626,14 +722,14 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
 
         try {
           const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${profile.portal_id}`
+            `https://api.suscopts.org/image/${profile.portal_id}`,
           );
 
           if (imageResponse.ok) {
             const imageBuffer = await imageResponse.arrayBuffer();
             const base64Image = Buffer.from(imageBuffer).toString("base64");
             profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type"
+              "content-type",
             )};base64,${base64Image}`;
           }
         } catch (imageError) {
@@ -651,7 +747,7 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
           family_role: profile.family_role,
           profile_pic: profileImageUrl,
         };
-      })
+      }),
     );
 
     res.json({
@@ -786,14 +882,14 @@ app.get("/getParentChildren", authenticateToken, async (req, res) => {
 
         try {
           const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${child.portal_id}`
+            `https://api.suscopts.org/image/${child.portal_id}`,
           );
 
           if (imageResponse.ok) {
             const imageBuffer = await imageResponse.arrayBuffer();
             const base64Image = Buffer.from(imageBuffer).toString("base64");
             profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type"
+              "content-type",
             )};base64,${base64Image}`;
           }
         } catch (imageError) {
@@ -828,7 +924,7 @@ app.get("/getParentChildren", authenticateToken, async (req, res) => {
           age: childAge,
           profile_pic: profileImageUrl,
         };
-      })
+      }),
     );
 
     res.json({
@@ -1052,7 +1148,7 @@ app.get("/getUserById/:id", authenticateToken, async (req, res) => {
 
     const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
       "get_user_roles_and_services",
-      { p_user_id: id }
+      { p_user_id: id },
     );
 
     if (!rpcError && rpcData && rpcData.length > 0) {
@@ -1239,7 +1335,7 @@ app.get("/getRolesAndServiceOfUser/:userId", async (req, res) => {
 
     const { data: rpcData, error: rpcError } = await supabase.supabase.rpc(
       "get_user_roles_and_services",
-      { p_user_id: userId }
+      { p_user_id: userId },
     );
 
     if (rpcError) {
@@ -1267,7 +1363,7 @@ app.get("/getRolesAndServiceOfUser/:userId", async (req, res) => {
  */
 app.get(
   "/getFamilyUsersForHead/:familyId",
-  authenticateToken,
+
   async (req, res) => {
     try {
       const { familyId } = req.params;
@@ -1296,7 +1392,7 @@ app.get(
         message: "Failed to fetch family users",
       });
     }
-  }
+  },
 );
 
 /**

@@ -62,7 +62,6 @@ app.put(
       console.log("Request body:", req.body);
       console.log("Files received:", req.files);
 
-      // Extract hymn data from request body
       const {
         idx,
         hymn_name,
@@ -76,20 +75,91 @@ app.put(
         created_at,
       } = req.body;
 
-      // Prepare update data
+      // Start with existing values from the form body (preserves current URLs)
+      let finalHymnFileUrl = hymn_file_location || null;
+      let finalHazzatUrl = hazzat || null;
+
+      // ── Handle hymn file upload BEFORE the DB write ──────────────────────
+      if (
+        req.files &&
+        req.files["hymn_file"] &&
+        req.files["hymn_file"].length > 0
+      ) {
+        try {
+          const hymnFile = req.files["hymn_file"][0];
+          const fileExt = path.extname(hymnFile.originalname);
+          const fileName = `hymn_${id}${fileExt}`;
+          const filePath = `hymns_files_json/${fileName}`;
+
+          const { error: uploadError } = await supabase.supabase.storage
+            .from("hymns_files_json")
+            .upload(filePath, hymnFile.buffer, {
+              contentType: hymnFile.mimetype,
+              upsert: true,
+            });
+
+          if (uploadError) {
+            console.error("Hymn file upload error:", uploadError);
+          } else {
+            const { data: publicUrlData } = supabase.supabase.storage
+              .from("hymns_files_json")
+              .getPublicUrl(filePath);
+            finalHymnFileUrl = publicUrlData.publicUrl;
+            console.log("Hymn file uploaded successfully:", finalHymnFileUrl);
+          }
+        } catch (fileError) {
+          console.error("Hymn file processing failed:", fileError);
+        }
+      }
+
+      // ── Handle hazzat file upload BEFORE the DB write ────────────────────
+      if (
+        req.files &&
+        req.files["hazzat_file"] &&
+        req.files["hazzat_file"].length > 0
+      ) {
+        try {
+          const hazzatFile = req.files["hazzat_file"][0];
+          const fileExt = path.extname(hazzatFile.originalname);
+          // Use a consistent, retrievable path (bucket + folder + filename)
+          const fileName = `hazzat_${id}${fileExt}`;
+          const filePath = `hazzat_files/${fileName}`;
+
+          const { error: uploadError } = await supabase.supabase.storage
+            .from("deacons_school_hymns_files")
+            .upload(filePath, hazzatFile.buffer, {
+              contentType: hazzatFile.mimetype,
+              upsert: true,
+            });
+
+          if (uploadError) {
+            console.error("Hazzat file upload error:", uploadError);
+          } else {
+            // getPublicUrl must use the SAME filePath used during upload
+            const { data: publicUrlData } = supabase.supabase.storage
+              .from("deacons_school_hymns_files")
+              .getPublicUrl(filePath);
+            finalHazzatUrl = publicUrlData.publicUrl;
+            console.log("Hazzat file uploaded successfully:", finalHazzatUrl);
+          }
+        } catch (hazzatError) {
+          console.error("Hazzat file processing failed:", hazzatError);
+        }
+      }
+
+      // ── Single DB write with all final values ─────────────────────────────
       const updateData = {
         hymn_name,
         hymn_recording,
         level_hymn_in,
-        hymn_file_location, // Keep existing URL if no new file uploaded
+        hymn_file_location: finalHymnFileUrl,
         hymn_ritual,
         points: parseInt(points),
-        hazzat: hazzat || null, // Keep existing URL if no new file uploaded
+        hazzat: finalHazzatUrl,
         order_taught: parseInt(order_taught),
         created_at,
       };
 
-      // Update hymn in database first
       const { data, error } = await supabase.supabase
         .from("deacons_school_hymns")
         .update(updateData)
@@ -99,134 +169,26 @@ app.put(
 
       if (error) {
         console.error("Database update error:", error);
-        throw new Error("Error updating hymn in database");
+        return res.status(500).json({
+          error: "Error updating hymn in database",
+          details: error.message,
+        });
       }
 
-      let finalHymnFileUrl = hymn_file_location;
-      let finalHazzatUrl = hazzat || null;
-
-      // Handle hymn file upload ONLY if new file provided
-      if (
-        req.files &&
-        req.files["hymn_file"] &&
-        req.files["hymn_file"].length > 0
-      ) {
-        try {
-          console.log("Processing hymn file upload...");
-          const hymnFile = req.files["hymn_file"][0];
-          const fileExt = path.extname(hymnFile.originalname);
-          const fileName = `hymn_${data.id}_${fileExt}`;
-          const filePath = `hymns_files_json/${fileName}`;
-
-          // Upload file to Supabase Storage
-          const { data: fileData, error: uploadError } =
-            await supabase.supabase.storage
-              .from("hymns_files_json")
-              .upload(filePath, hymnFile.buffer, {
-                contentType: hymnFile.mimetype,
-                upsert: true,
-              });
-
-          if (uploadError) {
-            console.error("Hymn file upload error:", uploadError);
-            throw new Error("Error uploading hymn file to storage");
-          }
-
-          // Get public URL of the uploaded file
-          const { data: publicUrlData } = supabase.supabase.storage
-            .from("hymns_files_json")
-            .getPublicUrl(filePath);
-
-          finalHymnFileUrl = publicUrlData.publicUrl;
-          console.log("Hymn file uploaded successfully:", finalHymnFileUrl);
-
-          // Update hymn with file URL in database
-          const { error: updateError } = await supabase.supabase
-            .from("deacons_school_hymns")
-            .update({ hymn_file_location: finalHymnFileUrl })
-            .eq("id", data.id);
-
-          if (updateError) {
-            console.error("Hymn file URL update error:", updateError);
-            throw new Error("Error updating hymn file URL in database");
-          }
-        } catch (fileError) {
-          console.error("Hymn file processing failed:", fileError);
-          console.log("Continuing without hymn file due to upload failure");
-        }
-      } else {
-        console.log("No new hymn file uploaded, keeping existing URL");
-      }
-
-      // Handle hazzat file upload ONLY if new file provided
-      if (
-        req.files &&
-        req.files["hazzat_file"] &&
-        req.files["hazzat_file"].length > 0
-      ) {
-        try {
-          console.log("Processing hazzat file upload...");
-          const hazzatFile = req.files["hazzat_file"][0];
-          const fileExt = path.extname(hazzatFile.originalname);
-          const fileName = `hazzat_${data.id}_${fileExt}`;
-
-          // Upload file to Supabase Storage
-          const { data: fileData, error: uploadError } =
-            await supabase.supabase.storage
-              .from("deacons_school_hymns_files")
-              .upload(fileName, hazzatFile.buffer, {
-                contentType: hazzatFile.mimetype,
-                upsert: true,
-              });
-
-          if (uploadError) {
-            console.error("Hazzat file upload error:", uploadError);
-            throw new Error("Error uploading hazzat file to storage");
-          }
-
-          // Get public URL of the uploaded file
-          const { data: publicUrlData } = supabase.supabase.storage
-            .from("deacons_school_hymns_files")
-            .getPublicUrl(fileName);
-
-          finalHazzatUrl = publicUrlData.publicUrl;
-          console.log("Hazzat file uploaded successfully:", finalHazzatUrl);
-
-          // Update hymn with hazzat URL in database
-          const { error: updateError } = await supabase.supabase
-            .from("deacons_school_hymns")
-            .update({ hazzat: finalHazzatUrl })
-            .eq("id", data.id);
-
-          if (updateError) {
-            console.error("Hazzat URL update error:", updateError);
-            throw new Error("Error updating hazzat URL in database");
-          }
-        } catch (hazzatError) {
-          console.error("Hazzat file processing failed:", hazzatError);
-          console.log("Continuing without hazzat file due to upload failure");
-        }
-      } else {
-        console.log("No new hazzat file uploaded, keeping existing URL");
-      }
-
-      res.send({
+      // data already contains the final URLs since we wrote them above
+      res.json({
         ok: true,
-        data: {
-          ...data,
-          hymn_file_location: finalHymnFileUrl,
-          hazzat: finalHazzatUrl,
-        },
+        data,
         message: "Hymn updated successfully",
       });
     } catch (error) {
       console.error("Error in updateHymn:", error.message);
-      res.status(500).send({
+      res.status(500).json({
         error: "An error occurred while processing the request",
         details: error.message,
       });
     }
-  }
+  },
 );
 app.get("/getHymnsByLevel/:level", async (req, res) => {
   const level = req.params.level;
@@ -306,7 +268,7 @@ app.get("/getMyCoursesTaught/:id", async (req, res) => {
     "get_ds_teacher_courses_by_portal_id",
     {
       p_user_id: portal_id,
-    }
+    },
   );
   console.log(data);
   console.log(error);
@@ -394,7 +356,7 @@ app.get("/getStudentCourses/:id", async (req, res) => {
     "get_ds_student_courses_by_portal_id",
     {
       p_user_id: portal_id,
-    }
+    },
   );
   console.log(data);
   console.log(error);
@@ -523,7 +485,7 @@ app.get("/getBehaviorReport", async (req, res) => {
             class_name
           )
         )
-      `
+      `,
       )
       .eq("present", true) // Only get records where student was present
       .gte("ds_class_sessions.session_date", start_date)
@@ -667,7 +629,7 @@ app.get("/getBehaviorReportAlt", async (req, res) => {
           last_name,
           email
         )
-      `
+      `,
         )
         .in("session_id", sessionIds)
         .eq("present", true)
@@ -796,7 +758,7 @@ app.get("/getBehaviorRecordByCourse/:course_id", async (req, res) => {
           session_date,
           topic
         )
-      `
+      `,
       )
       .eq("course_id", course_id)
       .order("users(first_name)", { ascending: true });
@@ -880,7 +842,7 @@ app.get("/getStudentBehaviorHistory/:student_id", async (req, res) => {
             class_name
           )
         )
-      `
+      `,
       )
       .eq("student_id", student_id)
       .eq("present", true);
@@ -924,10 +886,10 @@ app.get("/getStudentBehaviorHistory/:student_id", async (req, res) => {
     // Calculate statistics
     const totalRecords = behaviorHistory.length;
     const goodBehaviorCount = behaviorHistory.filter(
-      (r) => r.good_behavior === true
+      (r) => r.good_behavior === true,
     ).length;
     const badBehaviorCount = behaviorHistory.filter(
-      (r) => r.good_behavior === false
+      (r) => r.good_behavior === false,
     ).length;
     const goodPercentage =
       totalRecords > 0
@@ -992,7 +954,7 @@ app.post("/addDSCalendarForLevel/:level", async (req, res) => {
       .from("ds_calendar_week")
       .upsert(
         [calendarRow],
-        { onConflict: ["calendar_day", "level"] } // Ensures uniqueness
+        { onConflict: ["calendar_day", "level"] }, // Ensures uniqueness
       )
       .select();
 
@@ -1040,7 +1002,7 @@ app.post("/saveTeacherAssignments", async (req, res) => {
         {
           onConflict: "calendar_id,course_id",
           ignoreDuplicates: false,
-        }
+        },
       )
       .select();
 
@@ -1176,7 +1138,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           last_name,
           email,
           cellphone
-        )`
+        )`,
       )
       .eq("course_id", courseId)
       .eq("is_active", true)
@@ -1198,7 +1160,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
         try {
           // Using built-in fetch (Node.js 18+)
           const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`
+            `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`,
           );
 
           if (imageResponse.ok) {
@@ -1206,13 +1168,13 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
             const imageBuffer = await imageResponse.arrayBuffer();
             const base64Image = Buffer.from(imageBuffer).toString("base64");
             profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type"
+              "content-type",
             )};base64,${base64Image}`;
           }
         } catch (imageError) {
           console.warn(
             `Failed to fetch image for portal_id ${enrollment.profiles.portal_id}:`,
-            imageError.message
+            imageError.message,
           );
           // Continue without image - don't fail the entire request
         }
@@ -1227,7 +1189,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           is_active: enrollment.is_active,
           profile_pic: profileImageUrl,
         };
-      })
+      }),
     );
 
     res.json({
@@ -1266,7 +1228,7 @@ app.get("/getTeachersByCourse/:courseId", async (req, res) => {
           last_name,
           email,
           cellphone
-        )`
+        )`,
       )
       .eq("course_id", courseId)
       .eq("is_active", true)
@@ -1288,7 +1250,7 @@ app.get("/getTeachersByCourse/:courseId", async (req, res) => {
         try {
           // Using built-in fetch (Node.js 18+)
           const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`
+            `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`,
           );
 
           if (imageResponse.ok) {
@@ -1296,13 +1258,13 @@ app.get("/getTeachersByCourse/:courseId", async (req, res) => {
             const imageBuffer = await imageResponse.arrayBuffer();
             const base64Image = Buffer.from(imageBuffer).toString("base64");
             profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type"
+              "content-type",
             )};base64,${base64Image}`;
           }
         } catch (imageError) {
           console.warn(
             `Failed to fetch image for portal_id ${enrollment.profiles.portal_id}:`,
-            imageError.message
+            imageError.message,
           );
           // Continue without image - don't fail the entire request
         }
@@ -1317,7 +1279,7 @@ app.get("/getTeachersByCourse/:courseId", async (req, res) => {
           is_active: enrollment.is_active,
           profile_pic: profileImageUrl,
         };
-      })
+      }),
     );
 
     res.json({
@@ -1362,7 +1324,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           last_name,
           email,
           cellphone
-        )`
+        )`,
       )
       .eq("course_id", courseId)
       .eq("is_active", true)
@@ -1384,11 +1346,11 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
         try {
           const imageResponse = await axios.get(
             `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`,
-            { responseType: "arraybuffer" }
+            { responseType: "arraybuffer" },
           );
 
           const base64Image = Buffer.from(imageResponse.data).toString(
-            "base64"
+            "base64",
           );
           const contentType =
             imageResponse.headers["content-type"] || "image/jpeg";
@@ -1396,7 +1358,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
         } catch (imageError) {
           console.warn(
             `Failed to fetch image for portal_id ${enrollment.profiles.portal_id}:`,
-            imageError.message
+            imageError.message,
           );
         }
 
@@ -1410,7 +1372,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           is_active: enrollment.is_active,
           profile_pic: profileImageUrl,
         };
-      })
+      }),
     );
 
     res.json({
@@ -1545,7 +1507,7 @@ app.get("/getAttendanceBySession/:sessionId", async (req, res) => {
           session_date,
           topic
         )
-      `
+      `,
       )
       .eq("session_id", sessionId)
       .order("users(first_name)", { ascending: true });
@@ -1627,7 +1589,7 @@ app.get("/getAttendanceRecordByCourse/:course_id", async (req, res) => {
           session_date,
           topic
         )
-      `
+      `,
       )
       .eq("course_id", course_id)
       .order("users(first_name)", { ascending: true });
@@ -2185,7 +2147,7 @@ app.get("/getAttendanceScores/:studentId/:courseId", async (req, res) => {
           course_id,
           session_date
         )
-      `
+      `,
       )
       .eq("ds_class_sessions.course_id", courseId);
 
@@ -2219,7 +2181,7 @@ app.get("/getAttendanceScores/:studentId/:courseId", async (req, res) => {
 
     if (stats.total > 0) {
       stats.attendance_rate = Math.round(
-        ((stats.present + stats.excused) / stats.total) * 100
+        ((stats.present + stats.excused) / stats.total) * 100,
       );
     }
 
@@ -2504,11 +2466,11 @@ app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
       "get_current_week_calendar_by_course",
       {
         p_course_id: course_id,
-      }
+      },
     );
     console.log(data);
     const uniqueData = Array.from(
-      new Map(data.map((item) => [item.content_id, item])).values()
+      new Map(data.map((item) => [item.content_id, item])).values(),
     );
 
     console.log(uniqueData);
@@ -2586,7 +2548,7 @@ app.get("/getAssessmentItems/:categoryId/:course_id", async (req, res) => {
           category_name,
           weight_percentage
         )
-      `
+      `,
       )
       .eq("category_id", categoryId)
       .eq("course_id", course_id)
@@ -2618,7 +2580,7 @@ app.get("/getAssessmentItemsByCourse/:course_id", async (req, res) => {
           category_name,
           weight_percentage
         )
-      `
+      `,
       )
       .eq("course_id", course_id)
       .eq("is_active", true)
@@ -2650,7 +2612,7 @@ app.get(
           category_name,
           weight_percentage
         )
-      `
+      `,
         )
         .eq("course_id", course_id)
         .eq("category_id", category_id)
@@ -2667,7 +2629,7 @@ app.get(
       console.error("Unexpected error:", err);
       res.status(500).json({ success: false, error: "Internal server error" });
     }
-  }
+  },
 );
 
 // Get available hymns/rituals/etc for assessment creation
@@ -2775,7 +2737,7 @@ app.get("/getStudentScores/:studentId/:courseId", async (req, res) => {
       {
         p_student_id: studentId,
         p_course_id: courseId,
-      }
+      },
     );
     console.log(data);
     if (error) {
@@ -2804,7 +2766,7 @@ app.get("/getStudentsScoresByCourse/:courseId", async (req, res) => {
       "get_all_students_scores_by_course",
       {
         p_course_id: courseId,
-      }
+      },
     );
     console.log(data);
     if (error) {
@@ -2890,7 +2852,7 @@ app.post("/submitStudentScore", async (req, res) => {
         ],
         {
           onConflict: "student_id,course_id,quarter_id,item_id",
-        }
+        },
       )
       .select();
 
@@ -2985,7 +2947,7 @@ app.get("/getStudentsGradesByCourse/:courseId/", async (req, res) => {
       "get_course_students_grades",
       {
         p_course_id: courseId,
-      }
+      },
     );
 
     if (error) {
@@ -3028,7 +2990,7 @@ app.get(
       if (yearlyGrades && yearlyGrades.length > 0) {
         totalPoints = yearlyGrades.reduce(
           (sum, grade) => sum + (grade.total_raw_points || 0),
-          0
+          0,
         );
         isPassingYear = yearlyGrades.some((grade) => grade.is_passing_year);
       }
@@ -3047,7 +3009,7 @@ app.get(
       console.error("Unexpected error:", err);
       res.status(500).json({ success: false, error: "Internal server error" });
     }
-  }
+  },
 );
 
 // Get class average for assignment
@@ -3079,7 +3041,7 @@ app.get("/getClassAverage/:courseId/:quarterId/:itemId", async (req, res) => {
     }
 
     const scores = data.map(
-      (score) => (score.points_earned / score.points_possible) * 100
+      (score) => (score.points_earned / score.points_possible) * 100,
     );
     const average =
       scores.reduce((sum, score) => sum + score, 0) / scores.length;
