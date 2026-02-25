@@ -1,13 +1,16 @@
 const express = require("express");
 const app = express();
 const port = process.env.PORT || "3000";
-
+const axios = require("axios");
+const jwt = require("jsonwebtoken");
+require("dotenv").config();
 // Import route modules
 const announcements = require("./routes/announcments");
 const users = require("./routes/users");
 const calendar = require("./routes/calendar");
 const prayerRequests = require("./routes/prayerRequests");
 const deaconsSchool = require("./routes/deaconsSchool");
+const github = require("./routes/github");
 const diptych = require("./routes/diptych");
 const notifications = require("./routes/notifications");
 const services = require("./routes/services");
@@ -72,12 +75,12 @@ app.use((req, res, next) => {
   // Essential headers for authentication
   res.header(
     "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Access-Token, X-Key"
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Access-Token, X-Key",
   );
 
   res.header(
     "Access-Control-Allow-Methods",
-    "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    "GET, POST, PUT, DELETE, OPTIONS, PATCH",
   );
 
   // Allow credentials (important for authentication)
@@ -117,12 +120,12 @@ app.use((req, res, next) => {
 
   res.header(
     "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Access-Token, X-Key"
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Access-Token, X-Key",
   );
 
   res.header(
     "Access-Control-Allow-Methods",
-    "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    "GET, POST, PUT, DELETE, OPTIONS, PATCH",
   );
 
   res.header("Access-Control-Allow-Credentials", "true");
@@ -149,7 +152,7 @@ app.use(
         throw new Error("Invalid JSON");
       }
     },
-  })
+  }),
 );
 
 app.use(
@@ -157,7 +160,7 @@ app.use(
     limit: "10mb",
     extended: true,
     parameterLimit: 50000,
-  })
+  }),
 );
 
 // Request logging middleware (useful for debugging)
@@ -200,6 +203,7 @@ app.use("/diptych", diptych);
 app.use("/attendance", attendance);
 app.use("/monthlyBlogArticle", monthlyBlogArticle);
 app.use("/deaconsSchool", deaconsSchool);
+app.use("/github", github);
 
 // Root endpoint
 app.get("/", (req, res) => {
@@ -223,6 +227,7 @@ app.get("/", (req, res) => {
       attendance: "/attendance",
       monthlyBlog: "/monthlyBlogArticle",
       deaconsSchool: "/deaconsSchool",
+      github: "/github",
     },
   });
 });
