@@ -61,6 +61,27 @@ function pushSecretMiddleware(req, res, next) {
 // ─────────────────────────────────────────────
 const MANIFEST_REPO_PATH = "manifest.json";
 
+// ─── In-memory manifest cache ─────────────────────────────────────────────────
+// Avoids re-fetching the manifest from GitHub on every batch request.
+// Invalidated whenever regenerateAndCommitManifest() runs.
+let _manifestCache = null;
+
+async function getManifest() {
+  if (_manifestCache) return _manifestCache;
+  console.log("[Manifest] Cache miss — fetching from GitHub…");
+  const { content } = await fetchManifestFromRepo();
+  _manifestCache = content;
+  console.log(
+    `[Manifest] Cached — ${Object.keys(content.files ?? {}).length} files.`,
+  );
+  return _manifestCache;
+}
+
+function invalidateManifestCache() {
+  _manifestCache = null;
+  console.log("[Manifest] Cache invalidated.");
+}
+
 async function fetchManifestFromRepo() {
   const response = await axios.get(repoUrl(`/contents/${MANIFEST_REPO_PATH}`), {
     headers: githubHeaders(),
@@ -128,6 +149,8 @@ async function regenerateAndCommitManifest() {
     { headers: githubHeaders() },
   );
 
+  // Warm the in-memory cache with the freshly generated manifest
+  _manifestCache = newManifest;
   console.log(`Manifest updated: ${Object.keys(files).length} files.`);
   return newManifest;
 }
@@ -383,28 +406,49 @@ app.post("/files/batch", async (req, res) => {
     }
 
     if (ids.length > 100) {
-      return res.status(400).json({
-        success: false,
-        message: "Maximum 100 files per batch request",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Maximum 100 files per batch request",
+        });
     }
 
-    const { content: manifest } = await fetchManifestFromRepo();
+    // Use cached manifest — avoids a GitHub API call on every batch request
+    let manifest;
+    try {
+      manifest = await getManifest();
+    } catch (manifestErr) {
+      const msg = manifestErr.response?.data?.message || manifestErr.message;
+      console.error("[Batch] Failed to load manifest:", msg);
+      return res
+        .status(500)
+        .json({ success: false, message: `Manifest load failed: ${msg}` });
+    }
 
-    const CONCURRENCY = 10;
+    const CONCURRENCY = 5;
+    const DELAY_MS = 200; // pause between chunks to avoid GitHub rate limits
     const results = {};
     const notFound = [];
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     const chunks = [];
     for (let i = 0; i < ids.length; i += CONCURRENCY) {
       chunks.push(ids.slice(i, i + CONCURRENCY));
     }
 
-    for (const chunk of chunks) {
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
+      console.log(
+        `[Batch] Chunk ${ci + 1}/${chunks.length} — ${chunk.length} files`,
+      );
+
       await Promise.all(
         chunk.map(async (id) => {
           const entry = manifest.files[id];
           if (!entry) {
+            console.warn(`[Batch] ID not in manifest: "${id}"`);
             notFound.push(id);
             return;
           }
@@ -423,12 +467,23 @@ app.post("/files/batch", async (req, res) => {
               json: JSON.parse(raw),
             };
           } catch (err) {
-            console.error(`Failed to fetch file ${id}:`, err.message);
+            const status = err.response?.status;
+            const msg = err.response?.data?.message || err.message;
+            console.error(
+              `[Batch] ✗ "${id}" (${entry.path}) — HTTP ${status ?? "network"}: ${msg}`,
+            );
             notFound.push(id);
           }
         }),
       );
+
+      // Small pause between chunks to stay well under GitHub's rate limit
+      if (ci < chunks.length - 1) await sleep(DELAY_MS);
     }
+
+    console.log(
+      `[Batch] Done — fetched: ${Object.keys(results).length}, notFound: ${notFound.length}`,
+    );
 
     res.json({
       success: true,
@@ -437,10 +492,14 @@ app.post("/files/batch", async (req, res) => {
       files: results,
     });
   } catch (error) {
-    console.error("Batch fetch error:", error.response?.data || error);
-    res
-      .status(500)
-      .json({ success: false, message: "Failed to fetch batch files" });
+    // Log the FULL error so Heroku logs show exactly what went wrong
+    const status = error.response?.status;
+    const detail = error.response?.data || error.message || String(error);
+    console.error(`[Batch] Unhandled error — HTTP ${status ?? "?"}:`, detail);
+    res.status(500).json({
+      success: false,
+      message: `Batch failed: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`,
+    });
   }
 });
 
