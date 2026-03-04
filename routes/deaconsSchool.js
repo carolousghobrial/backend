@@ -3,6 +3,7 @@ const bp = require("body-parser");
 const app = express();
 const multer = require("multer");
 const path = require("path");
+const { createClient } = require("@supabase/supabase-js");
 
 const supabase = require("../config/config");
 const storage = multer.memoryStorage();
@@ -10,7 +11,392 @@ const upload = multer({
   storage: storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
+// At the top of the file, add a second Supabase client for 7 Tunes
+const supabaseTunes = createClient(
+  process.env.SUPABASE_URL_BOOKS,
+  process.env.SUPABASE_SERVICE_KEY_BOOKS,
+);
 
+// ─── GET: All tune files from 7 Tunes project (for the picker) ───
+app.get("/getTuneFiles", async (req, res) => {
+  try {
+    const search = (req.query.search || "").trim();
+    let query = supabaseTunes
+      .from("seven_tunes_books")
+      .select("file_path, english_title, arabic_title, coptic_title")
+      .order("file_path")
+      .limit(80);
+
+    if (search) {
+      query = query.or(
+        `file_path.ilike.%${search}%,` +
+          `english_title.ilike.%${search}%,` +
+          `arabic_title.ilike.%${search}%`,
+      );
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── GET: Hymn folders ───
+app.get("/getHymnFolders", async (req, res) => {
+  const { data, error } = await supabase.supabase
+    .from("hymns_folders")
+    .select("*")
+    .order("name");
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+// ─── Create folder (with optional parent) ───
+app.post("/createHymnFolder", async (req, res) => {
+  try {
+    const { name, parent_id } = req.body;
+    if (!name?.trim())
+      return res
+        .status(400)
+        .json({ success: false, error: "name is required" });
+
+    const { data, error } = await supabase.supabase
+      .from("hymns_folders")
+      .insert([{ name: name.trim(), parent_id: parent_id || null }])
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Delete folder ───
+app.delete("/deleteHymnFolder/:id", async (req, res) => {
+  const { error } = await supabase.supabase
+    .from("hymns_folders")
+    .delete()
+    .eq("id", req.params.id);
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true });
+});
+
+// ─── Update getHymnFolders to include parent_id ───
+// (already returns * so no change needed — but confirm your select is .select('*'))
+// ─── UPDATE: Patch tune_file_path and folder_id on a hymn ───
+app.post("/syncAllHymnIdsToSevenTunes", async (req, res) => {
+  try {
+    // 1. Fetch all hymns that have a tune_file_path
+    const { data: hymns, error: hymnsError } = await supabase.supabase
+      .from("deacons_school_hymns")
+      .select("id, tune_file_path")
+      .not("tune_file_path", "is", null);
+
+    if (hymnsError) throw new Error(hymnsError.message);
+
+    // 2. Group hymn ids by file_path
+    // { "agpeya/sixth-hour/kyrie.json": [1, 4, 17], ... }
+    const filePathMap = {};
+    for (const hymn of hymns) {
+      if (!filePathMap[hymn.tune_file_path]) {
+        filePathMap[hymn.tune_file_path] = [];
+      }
+      filePathMap[hymn.tune_file_path].push(hymn.id);
+    }
+
+    const results = { updated: [], notFound: [], errors: [] };
+
+    // 3. For each unique file_path, find the seven_tunes_books row and set hymn_ids
+    for (const [filePath, hymnIds] of Object.entries(filePathMap)) {
+      const { data: bookRow, error: fetchError } = await supabaseTunes
+        .from("seven_tunes_books")
+        .select("id, hymn_ids")
+        .eq("file_path", filePath)
+        .single();
+
+      if (fetchError || !bookRow) {
+        results.notFound.push(filePath);
+        continue;
+      }
+
+      // Merge with any existing ids already on the row (in case some were set manually)
+      const existing = bookRow.hymn_ids || [];
+      const merged = [...new Set([...existing, ...hymnIds])];
+
+      const { error: updateError } = await supabaseTunes
+        .from("seven_tunes_books")
+        .update({ hymn_ids: merged })
+        .eq("id", bookRow.id);
+
+      if (updateError) {
+        results.errors.push({ filePath, error: updateError.message });
+      } else {
+        results.updated.push({ filePath, hymn_ids: merged });
+      }
+    }
+
+    res.json({
+      success: true,
+      summary: {
+        total_hymns: hymns.length,
+        unique_files: Object.keys(filePathMap).length,
+        updated: results.updated.length,
+        not_found_in_seven_tunes: results.notFound.length,
+        errors: results.errors.length,
+      },
+      details: results,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+// ─── GET: All hymns with media status flags (for filtered picker) ───
+// Add this alongside your other hymn endpoints
+
+app.get("/getHymnsWithMediaStatus", async (req, res) => {
+  try {
+    // 1. Fetch all hymns
+    const { data: hymns, error: hymnsError } = await supabase.supabase
+      .from("deacons_school_hymns")
+      .select(
+        "id, hymn_name, hymn_ritual, points, order_taught, level_hymn_in, folder_id, tune_file_path",
+      )
+      .order("order_taught");
+
+    if (hymnsError) throw new Error(hymnsError.message);
+
+    // 2. Fetch all recording hymn_ids (just the ids, no content needed)
+    const { data: recordings, error: recError } = await supabase.supabase
+      .from("deacons_school_hymn_recordings")
+      .select("hymn_id");
+
+    if (recError) throw new Error(recError.message);
+
+    // 3. Fetch all hazzat hymn_ids
+    const { data: hazzat, error: hazError } = await supabase.supabase
+      .from("deacons_school_hymn_hazzat")
+      .select("hymn_id");
+
+    if (hazError) throw new Error(hazError.message);
+
+    // 4. Build sets for O(1) lookup
+    const hymnIdsWithRecordings = new Set(recordings.map((r) => r.hymn_id));
+    const hymnIdsWithHazzat = new Set(hazzat.map((h) => h.hymn_id));
+
+    // 5. Attach flags to each hymn
+    const enriched = hymns.map((hymn) => ({
+      ...hymn,
+      has_recordings: hymnIdsWithRecordings.has(hymn.id),
+      has_hazzat: hymnIdsWithHazzat.has(hymn.id),
+      has_tune_file: !!hymn.tune_file_path,
+    }));
+
+    res.json({ success: true, data: enriched });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.patch("/updateHymnMeta/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tune_file_path, folder_id } = req.body;
+
+    const updates = {};
+    if (tune_file_path !== undefined)
+      updates.tune_file_path = tune_file_path || null;
+    if (folder_id !== undefined) updates.folder_id = folder_id || null;
+
+    const { data, error } = await supabase.supabase
+      .from("deacons_school_hymns")
+      .update(updates)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    // Sync to 7 Tunes if tune_file_path changed
+    if (tune_file_path !== undefined) {
+      const { data: oldHymn } = await supabase.supabase
+        .from("deacons_school_hymns")
+        .select("tune_file_path")
+        .eq("id", id)
+        .single();
+
+      await syncHymnIdToSevenTunes(
+        tune_file_path || null,
+        oldHymn?.tune_file_path || null,
+        parseInt(id),
+      );
+    }
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── RECORDINGS ───────────────────────────────────────────────
+
+app.get("/getHymnRecordings/:hymnId", async (req, res) => {
+  const { data, error } = await supabase.supabase
+    .from("deacons_school_hymn_recordings")
+    .select("*")
+    .eq("hymn_id", req.params.hymnId)
+    .order("created_at");
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+app.post("/addHymnRecording", async (req, res) => {
+  const { hymn_id, title, url, type } = req.body;
+  if (!hymn_id || !title || !url)
+    return res
+      .status(400)
+      .json({ success: false, error: "hymn_id, title, url required" });
+
+  const { data, error } = await supabase.supabase
+    .from("deacons_school_hymn_recordings")
+    .insert([{ hymn_id, title, url, type: type || "youtube" }])
+    .select()
+    .single();
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+app.put("/updateHymnRecording/:id", async (req, res) => {
+  const { title, url, type } = req.body;
+  const { data, error } = await supabase.supabase
+    .from("deacons_school_hymn_recordings")
+    .update({ title, url, type })
+    .eq("id", req.params.id)
+    .select()
+    .single();
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+app.delete("/deleteHymnRecording/:id", async (req, res) => {
+  const { error } = await supabase.supabase
+    .from("deacons_school_hymn_recordings")
+    .delete()
+    .eq("id", req.params.id);
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true });
+});
+app.get("/getTuneContent", async (req, res) => {
+  try {
+    const filePath = (req.query.path || "").trim();
+    if (!filePath)
+      return res
+        .status(400)
+        .json({ success: false, error: "path is required" });
+
+    const { data, error } = await supabaseTunes
+      .from("seven_tunes_books")
+      .select("content") // ← whatever your JSON column is named
+      .eq("file_path", filePath)
+      .single();
+    console.log(data);
+    if (error) throw new Error(error.message);
+    res.json(data.content);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+// ─── HAZZAT ───────────────────────────────────────────────────
+app.get("/getHymnsByFolder/:folderId", async (req, res) => {
+  const { folderId } = req.params;
+  const { data, error } = await supabase.supabase
+    .from("deacons_school_hymns")
+    .select("*")
+    .eq("folder_id", folderId)
+    .order("order_taught");
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+app.get("/getHymnsWithNoFolder", async (req, res) => {
+  const { data, error } = await supabase.supabase
+    .from("deacons_school_hymns")
+    .select("*")
+    .is("folder_id", null)
+    .order("order_taught");
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+app.get("/getHymnHazzat/:hymnId", async (req, res) => {
+  const { data, error } = await supabase.supabase
+    .from("deacons_school_hymn_hazzat")
+    .select("*")
+    .eq("hymn_id", req.params.hymnId)
+    .order("created_at");
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+app.post("/addHymnHazzat", upload.single("hazzat_file"), async (req, res) => {
+  try {
+    const { hymn_id, title, type } = req.body;
+    if (!hymn_id || !title)
+      return res
+        .status(400)
+        .json({ success: false, error: "hymn_id and title required" });
+
+    let url = req.body.url || "";
+
+    if (req.file) {
+      const ext = path.extname(req.file.originalname);
+      const fp = `hazzat_files/hymn_${hymn_id}_${Date.now()}${ext}`;
+      const { error: upErr } = await supabase.supabase.storage
+        .from("deacons_school_hymns_files")
+        .upload(fp, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: true,
+        });
+      if (upErr) throw new Error(upErr.message);
+      const { data: urlData } = supabase.supabase.storage
+        .from("deacons_school_hymns_files")
+        .getPublicUrl(fp);
+      url = urlData.publicUrl;
+    }
+
+    if (!url)
+      return res
+        .status(400)
+        .json({ success: false, error: "Provide a file or URL" });
+
+    const { data, error } = await supabase.supabase
+      .from("deacons_school_hymn_hazzat")
+      .insert([{ hymn_id, title, url, type: type || "pdf" }])
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/deleteHymnHazzat/:id", async (req, res) => {
+  const { error } = await supabase.supabase
+    .from("deacons_school_hymn_hazzat")
+    .delete()
+    .eq("id", req.params.id);
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true });
+});
 const daysOfWeek = [
   "Sunday",
   "Monday",
@@ -58,12 +444,7 @@ app.put(
     try {
       const { id } = req.params;
 
-      console.log("Received update request for hymn ID:", id);
-      console.log("Request body:", req.body);
-      console.log("Files received:", req.files);
-
       const {
-        idx,
         hymn_name,
         hymn_recording,
         level_hymn_in,
@@ -72,92 +453,80 @@ app.put(
         points,
         hazzat,
         order_taught,
-        created_at,
+        tune_file_path,
+        folder_id,
+        _old_tune_file_path,
       } = req.body;
 
-      // Start with existing values from the form body (preserves current URLs)
+      // ── Parallel file uploads ─────────────────────────────────────────────
       let finalHymnFileUrl = hymn_file_location || null;
       let finalHazzatUrl = hazzat || null;
 
-      // ── Handle hymn file upload BEFORE the DB write ──────────────────────
-      if (
-        req.files &&
-        req.files["hymn_file"] &&
-        req.files["hymn_file"].length > 0
-      ) {
-        try {
-          const hymnFile = req.files["hymn_file"][0];
-          const fileExt = path.extname(hymnFile.originalname);
-          const fileName = `hymn_${id}${fileExt}`;
-          const filePath = `hymns_files_json/${fileName}`;
+      const uploadTasks = [];
 
-          const { error: uploadError } = await supabase.supabase.storage
-            .from("hymns_files_json")
-            .upload(filePath, hymnFile.buffer, {
-              contentType: hymnFile.mimetype,
-              upsert: true,
-            });
-
-          if (uploadError) {
-            console.error("Hymn file upload error:", uploadError);
-          } else {
-            const { data: publicUrlData } = supabase.supabase.storage
+      if (req.files?.["hymn_file"]?.[0]) {
+        uploadTasks.push(
+          (async () => {
+            const file = req.files["hymn_file"][0];
+            const ext = path.extname(file.originalname);
+            const filePath = `hymns_files_json/hymn_${id}${ext}`;
+            const { error } = await supabase.supabase.storage
               .from("hymns_files_json")
-              .getPublicUrl(filePath);
-            finalHymnFileUrl = publicUrlData.publicUrl;
-            console.log("Hymn file uploaded successfully:", finalHymnFileUrl);
-          }
-        } catch (fileError) {
-          console.error("Hymn file processing failed:", fileError);
-        }
+              .upload(filePath, file.buffer, {
+                contentType: file.mimetype,
+                upsert: true,
+              });
+            if (!error) {
+              const { data } = supabase.supabase.storage
+                .from("hymns_files_json")
+                .getPublicUrl(filePath);
+              finalHymnFileUrl = data.publicUrl;
+            } else {
+              console.error("Hymn file upload error:", error.message);
+            }
+          })(),
+        );
       }
 
-      // ── Handle hazzat file upload BEFORE the DB write ────────────────────
-      if (
-        req.files &&
-        req.files["hazzat_file"] &&
-        req.files["hazzat_file"].length > 0
-      ) {
-        try {
-          const hazzatFile = req.files["hazzat_file"][0];
-          const fileExt = path.extname(hazzatFile.originalname);
-          // Use a consistent, retrievable path (bucket + folder + filename)
-          const fileName = `hazzat_${id}${fileExt}`;
-          const filePath = `hazzat_files/${fileName}`;
-
-          const { error: uploadError } = await supabase.supabase.storage
-            .from("deacons_school_hymns_files")
-            .upload(filePath, hazzatFile.buffer, {
-              contentType: hazzatFile.mimetype,
-              upsert: true,
-            });
-
-          if (uploadError) {
-            console.error("Hazzat file upload error:", uploadError);
-          } else {
-            // getPublicUrl must use the SAME filePath used during upload
-            const { data: publicUrlData } = supabase.supabase.storage
+      if (req.files?.["hazzat_file"]?.[0]) {
+        uploadTasks.push(
+          (async () => {
+            const file = req.files["hazzat_file"][0];
+            const ext = path.extname(file.originalname);
+            const filePath = `hazzat_files/hazzat_${id}${ext}`;
+            const { error } = await supabase.supabase.storage
               .from("deacons_school_hymns_files")
-              .getPublicUrl(filePath);
-            finalHazzatUrl = publicUrlData.publicUrl;
-            console.log("Hazzat file uploaded successfully:", finalHazzatUrl);
-          }
-        } catch (hazzatError) {
-          console.error("Hazzat file processing failed:", hazzatError);
-        }
+              .upload(filePath, file.buffer, {
+                contentType: file.mimetype,
+                upsert: true,
+              });
+            if (!error) {
+              const { data } = supabase.supabase.storage
+                .from("deacons_school_hymns_files")
+                .getPublicUrl(filePath);
+              finalHazzatUrl = data.publicUrl;
+            } else {
+              console.error("Hazzat file upload error:", error.message);
+            }
+          })(),
+        );
       }
 
-      // ── Single DB write with all final values ─────────────────────────────
+      if (uploadTasks.length) await Promise.all(uploadTasks);
+
+      // ── DB write ──────────────────────────────────────────────────────────
       const updateData = {
-        hymn_name,
-        hymn_recording,
-        level_hymn_in,
+        hymn_name: hymn_name || null,
+        hymn_recording: hymn_recording || null,
+        level_hymn_in: level_hymn_in || null,
+        hymn_ritual: hymn_ritual || null,
         hymn_file_location: finalHymnFileUrl,
-        hymn_ritual,
-        points: parseInt(points),
         hazzat: finalHazzatUrl,
-        order_taught: parseInt(order_taught),
-        created_at,
+        points: points ? parseInt(points) : 0,
+        order_taught: order_taught ? parseInt(order_taught) : 0,
+        tune_file_path: tune_file_path || null,
+        folder_id: folder_id ? parseInt(folder_id) : null,
+        // Never pass created_at — let Postgres keep the original value
       };
 
       const { data, error } = await supabase.supabase
@@ -168,25 +537,27 @@ app.put(
         .single();
 
       if (error) {
-        console.error("Database update error:", error);
-        return res.status(500).json({
-          error: "Error updating hymn in database",
-          details: error.message,
-        });
+        console.error("DB update error:", error.message);
+        return res
+          .status(500)
+          .json({ error: "Error updating hymn", details: error.message });
       }
 
-      // data already contains the final URLs since we wrote them above
-      res.json({
-        ok: true,
-        data,
-        message: "Hymn updated successfully",
-      });
-    } catch (error) {
-      console.error("Error in updateHymn:", error.message);
-      res.status(500).json({
-        error: "An error occurred while processing the request",
-        details: error.message,
-      });
+      // ── Sync tune_file_path to seven_tunes_books ──────────────────────────
+      if (tune_file_path !== undefined) {
+        await syncHymnIdToSevenTunes(
+          tune_file_path || null,
+          _old_tune_file_path || null,
+          parseInt(id),
+        );
+      }
+
+      res.json({ ok: true, data, message: "Hymn updated successfully" });
+    } catch (err) {
+      console.error("Error in updateHymn:", err.message);
+      res
+        .status(500)
+        .json({ error: "An error occurred", details: err.message });
     }
   },
 );
@@ -3204,5 +3575,83 @@ app.put("/updateAssessmentItem/:itemId", async (req, res) => {
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
+// PATCH /renameHymnFolder/:id
+app.patch("/renameHymnFolder/:id", async (req, res) => {
+  const { name } = req.body;
+  const { data, error } = await supabase
+    .from("hymns_folder")
+    .update({ name })
+    .eq("id", req.params.id)
+    .select()
+    .single();
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
 
+// PATCH /assignHymnFolder
+app.patch("/assignHymnFolder", async (req, res) => {
+  const { file_path, folder_id } = req.body;
+  const { data, error } = await supabase
+    .from("deacons_school_hymns")
+    .update({ folder_id: folder_id ?? null })
+    .eq("tune_file_path", file_path)
+    .select()
+    .single();
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+app.get("/getTuneFiles", async (req, res) => {
+  try {
+    const search = (req.query.search || "").trim();
+
+    const { data, error } = await supabaseTunes.rpc("search_tune_files", {
+      search_query: search,
+    });
+
+    if (error) throw new Error(error.message);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+async function syncHymnIdToSevenTunes(newFilePath, oldFilePath, hymnId) {
+  // Remove from old file's array
+  if (oldFilePath) {
+    const { data: oldRow } = await supabaseTunes
+      .from("seven_tunes_books")
+      .select("id, hymn_ids")
+      .eq("file_path", oldFilePath)
+      .single();
+
+    if (oldRow) {
+      await supabaseTunes
+        .from("seven_tunes_books")
+        .update({
+          hymn_ids: (oldRow.hymn_ids || []).filter((id) => id !== hymnId),
+        })
+        .eq("id", oldRow.id);
+    }
+  }
+
+  // Add to new file's array
+  if (newFilePath) {
+    const { data: newRow } = await supabaseTunes
+      .from("seven_tunes_books")
+      .select("id, hymn_ids")
+      .eq("file_path", newFilePath)
+      .single();
+
+    if (newRow) {
+      const existing = newRow.hymn_ids || [];
+      if (!existing.includes(hymnId)) {
+        await supabaseTunes
+          .from("seven_tunes_books")
+          .update({ hymn_ids: [...existing, hymnId] })
+          .eq("id", newRow.id);
+      }
+    }
+  }
+}
 module.exports = app;

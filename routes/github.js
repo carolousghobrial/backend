@@ -1,12 +1,14 @@
 require("dotenv").config();
 const express = require("express");
+const router = express.Router();
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
-const bp = require("body-parser");
-const app = express();
+const { createClient } = require("@supabase/supabase-js");
 
-app.use(bp.json());
-app.use(bp.urlencoded({ extended: true }));
+const supabase = createClient(
+  process.env.SUPABASE_URL_BOOKS,
+  process.env.SUPABASE_SERVICE_KEY_BOOKS,
+);
 
 // ─────────────────────────────────────────────
 // HELPERS
@@ -59,11 +61,8 @@ function pushSecretMiddleware(req, res, next) {
 // ─────────────────────────────────────────────
 // MANIFEST
 // ─────────────────────────────────────────────
-const MANIFEST_REPO_PATH = "manifest.json";
 
-// ─── In-memory manifest cache ─────────────────────────────────────────────────
-// Avoids re-fetching the manifest from GitHub on every batch request.
-// Invalidated whenever regenerateAndCommitManifest() runs.
+const MANIFEST_REPO_PATH = "manifest.json";
 let _manifestCache = null;
 
 async function getManifest() {
@@ -87,10 +86,7 @@ async function fetchManifestFromRepo() {
     headers: githubHeaders(),
   });
   const raw = Buffer.from(response.data.content, "base64").toString("utf-8");
-  return {
-    content: JSON.parse(raw),
-    sha: response.data.sha,
-  };
+  return { content: JSON.parse(raw), sha: response.data.sha };
 }
 
 async function regenerateAndCommitManifest() {
@@ -113,10 +109,7 @@ async function regenerateAndCommitManifest() {
       item.path !== MANIFEST_REPO_PATH
     ) {
       const id = pathToId(item.path);
-      files[id] = {
-        path: item.path,
-        sha: item.sha,
-      };
+      files[id] = { path: item.path, sha: item.sha };
     }
   }
 
@@ -149,7 +142,6 @@ async function regenerateAndCommitManifest() {
     { headers: githubHeaders() },
   );
 
-  // Warm the in-memory cache with the freshly generated manifest
   _manifestCache = newManifest;
   console.log(`Manifest updated: ${Object.keys(files).length} files.`);
   return newManifest;
@@ -159,7 +151,7 @@ async function regenerateAndCommitManifest() {
 // AUTH
 // ─────────────────────────────────────────────
 
-app.get("/auth/github", (req, res) => {
+router.get("/auth/github", (req, res) => {
   const githubAuthUrl =
     `https://github.com/login/oauth/authorize` +
     `?client_id=${process.env.GITHUB_CLIENT_ID}` +
@@ -167,7 +159,7 @@ app.get("/auth/github", (req, res) => {
   res.redirect(githubAuthUrl);
 });
 
-app.get("/auth/github/callback", async (req, res) => {
+router.get("/auth/github/callback", async (req, res) => {
   try {
     const { code } = req.query;
     const tokenResponse = await axios.post(
@@ -196,7 +188,7 @@ app.get("/auth/github/callback", async (req, res) => {
 // HEALTH CHECK
 // ─────────────────────────────────────────────
 
-app.get("/", async (req, res) => {
+router.get("/health", async (req, res) => {
   try {
     const response = await axios.get(repoUrl(), { headers: githubHeaders() });
     res.json({
@@ -219,7 +211,7 @@ app.get("/", async (req, res) => {
 // GET MANIFEST
 // ─────────────────────────────────────────────
 
-app.get("/manifest", async (req, res) => {
+router.get("/manifest", async (req, res) => {
   try {
     const { content } = await fetchManifestFromRepo();
     res.json({ success: true, ...content });
@@ -249,7 +241,7 @@ app.get("/manifest", async (req, res) => {
 // LAST PUSH
 // ─────────────────────────────────────────────
 
-app.get("/last-push", async (req, res) => {
+router.get("/last-push", async (req, res) => {
   try {
     const { content } = await fetchManifestFromRepo();
     res.json({ success: true, lastPushAt: content.lastUpdated || null });
@@ -270,10 +262,9 @@ app.get("/last-push", async (req, res) => {
 
 // ─────────────────────────────────────────────
 // NOTIFY PUSH
-// Called by GitHub Action on every push to main.
 // ─────────────────────────────────────────────
 
-app.post("/notify-push", pushSecretMiddleware, async (req, res) => {
+router.post("/notify-push", pushSecretMiddleware, async (req, res) => {
   try {
     const manifest = await regenerateAndCommitManifest();
     res.json({
@@ -294,7 +285,7 @@ app.post("/notify-push", pushSecretMiddleware, async (req, res) => {
 // GET FILE BY APP ID
 // ─────────────────────────────────────────────
 
-app.get("/file/id/:id", async (req, res) => {
+router.get("/file/id/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -313,29 +304,30 @@ app.get("/file/id/:id", async (req, res) => {
         .json({ success: false, message: `File ID '${id}' not found` });
     }
 
-    const fileResponse = await axios.get(repoUrl(`/contents/${entry.path}`), {
-      headers: githubHeaders(),
-    });
+    const filePath = entry.path.replace(/\.json$/i, "");
 
-    const raw = Buffer.from(fileResponse.data.content, "base64")
-      .toString("utf-8")
-      .replace(/^\uFEFF/, "")
-      .trim();
+    const { data, error } = await supabase
+      .from("seven_tunes_books")
+      .select("*")
+      .eq("file_path", filePath)
+      .single();
+
+    if (error || !data) {
+      return res
+        .status(404)
+        .json({ success: false, message: "File not found in database" });
+    }
 
     res.json({
       success: true,
       id,
       path: entry.path,
-      sha: fileResponse.data.sha,
-      size: fileResponse.data.size,
-      json: JSON.parse(raw),
+      json: data.content,
+      updated_at: data.updated_at,
     });
   } catch (error) {
-    console.error("File by ID error:", error.response?.data || error);
-    res.status(error.response?.status || 500).json({
-      success: false,
-      message: error.response?.data?.message || "Failed to fetch file",
-    });
+    console.error("File by ID error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -343,51 +335,39 @@ app.get("/file/id/:id", async (req, res) => {
 // GET FILE BY PATH
 // ─────────────────────────────────────────────
 
-app.get("/file", async (req, res) => {
+router.get("/file", async (req, res) => {
   try {
-    const filePath = req.query.path;
+    const filePath = (req.query.path || "").replace(/\.json$/i, "");
 
     if (!filePath) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Missing file path" });
+      return res.status(400).json({ success: false, message: "Missing path" });
     }
-
     if (filePath.includes("..")) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid file path" });
+      return res.status(400).json({ success: false, message: "Invalid path" });
     }
 
-    const response = await axios.get(repoUrl(`/contents/${filePath}`), {
-      headers: githubHeaders(),
-    });
+    const { data, error } = await supabase
+      .from("seven_tunes_books")
+      .select("*")
+      .eq("file_path", filePath)
+      .single();
 
-    if (response.data.type !== "file") {
+    if (error || !data) {
       return res
-        .status(400)
-        .json({ success: false, message: "Path is not a file" });
+        .status(404)
+        .json({ success: false, message: "File not found" });
     }
-
-    const raw = Buffer.from(response.data.content, "base64")
-      .toString("utf-8")
-      .replace(/^\uFEFF/, "")
-      .trim();
 
     res.json({
       success: true,
-      id: pathToId(filePath),
-      path: filePath,
-      sha: response.data.sha,
-      size: response.data.size,
-      json: JSON.parse(raw),
+      id: data.file_path.split("/").join(""),
+      path: data.file_path,
+      json: data.content,
+      updated_at: data.updated_at,
     });
   } catch (error) {
-    console.error("File fetch error:", error.response?.data || error);
-    res.status(error.response?.status || 500).json({
-      success: false,
-      message: error.response?.data?.message || "Failed to fetch file",
-    });
+    console.error("File fetch error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -395,7 +375,7 @@ app.get("/file", async (req, res) => {
 // BATCH FILES
 // ─────────────────────────────────────────────
 
-app.post("/files/batch", async (req, res) => {
+router.post("/files/batch", async (req, res) => {
   try {
     const { ids } = req.body;
 
@@ -404,102 +384,74 @@ app.post("/files/batch", async (req, res) => {
         .status(400)
         .json({ success: false, message: "ids must be a non-empty array" });
     }
-
     if (ids.length > 100) {
       return res
         .status(400)
-        .json({
-          success: false,
-          message: "Maximum 100 files per batch request",
-        });
+        .json({ success: false, message: "Maximum 100 files per batch" });
     }
 
-    // Use cached manifest — avoids a GitHub API call on every batch request
     let manifest;
     try {
       manifest = await getManifest();
-    } catch (manifestErr) {
-      const msg = manifestErr.response?.data?.message || manifestErr.message;
-      console.error("[Batch] Failed to load manifest:", msg);
+    } catch (err) {
       return res
         .status(500)
-        .json({ success: false, message: `Manifest load failed: ${msg}` });
+        .json({ success: false, message: "Manifest load failed" });
     }
 
-    const CONCURRENCY = 5;
-    const DELAY_MS = 200; // pause between chunks to avoid GitHub rate limits
-    const results = {};
+    const idToPath = {};
     const notFound = [];
 
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-    const chunks = [];
-    for (let i = 0; i < ids.length; i += CONCURRENCY) {
-      chunks.push(ids.slice(i, i + CONCURRENCY));
+    for (const id of ids) {
+      const entry = manifest.files[id];
+      if (!entry) {
+        notFound.push(id);
+      } else {
+        idToPath[id] = entry.path.replace(/\.json$/i, "");
+      }
     }
 
-    for (let ci = 0; ci < chunks.length; ci++) {
-      const chunk = chunks[ci];
-      console.log(
-        `[Batch] Chunk ${ci + 1}/${chunks.length} — ${chunk.length} files`,
-      );
+    const filePaths = Object.values(idToPath);
 
-      await Promise.all(
-        chunk.map(async (id) => {
-          const entry = manifest.files[id];
-          if (!entry) {
-            console.warn(`[Batch] ID not in manifest: "${id}"`);
-            notFound.push(id);
-            return;
-          }
-          try {
-            const fileResponse = await axios.get(
-              repoUrl(`/contents/${entry.path}`),
-              { headers: githubHeaders() },
-            );
-            const raw = Buffer.from(fileResponse.data.content, "base64")
-              .toString("utf-8")
-              .replace(/^\uFEFF/, "")
-              .trim();
-            results[id] = {
-              path: entry.path,
-              sha: fileResponse.data.sha,
-              json: JSON.parse(raw),
-            };
-          } catch (err) {
-            const status = err.response?.status;
-            const msg = err.response?.data?.message || err.message;
-            console.error(
-              `[Batch] ✗ "${id}" (${entry.path}) — HTTP ${status ?? "network"}: ${msg}`,
-            );
-            notFound.push(id);
-          }
-        }),
-      );
+    const { data, error } = await supabase
+      .from("seven_tunes_books")
+      .select("file_path, content, updated_at")
+      .in("file_path", filePaths);
 
-      // Small pause between chunks to stay well under GitHub's rate limit
-      if (ci < chunks.length - 1) await sleep(DELAY_MS);
+    if (error) throw new Error(error.message);
+
+    const pathToRow = {};
+    for (const row of data) {
+      pathToRow[row.file_path] = row;
+    }
+
+    const files = {};
+    for (const [id, path] of Object.entries(idToPath)) {
+      const row = pathToRow[path];
+      if (row) {
+        files[id] = {
+          path: path + ".json",
+          json: row.content,
+          updated_at: row.updated_at,
+        };
+      } else {
+        notFound.push(id);
+      }
     }
 
     console.log(
-      `[Batch] Done — fetched: ${Object.keys(results).length}, notFound: ${notFound.length}`,
+      `[Batch] fetched: ${Object.keys(files).length}, notFound: ${notFound.length}`,
     );
 
     res.json({
       success: true,
-      fetched: Object.keys(results).length,
+      fetched: Object.keys(files).length,
       notFound,
-      files: results,
+      files,
     });
   } catch (error) {
-    // Log the FULL error so Heroku logs show exactly what went wrong
-    const status = error.response?.status;
-    const detail = error.response?.data || error.message || String(error);
-    console.error(`[Batch] Unhandled error — HTTP ${status ?? "?"}:`, detail);
-    res.status(500).json({
-      success: false,
-      message: `Batch failed: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`,
-    });
+    console.error("[Batch] error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -507,44 +459,59 @@ app.post("/files/batch", async (req, res) => {
 // FOLDERS
 // ─────────────────────────────────────────────
 
-app.get("/folders/*?", async (req, res) => {
+router.get("/folders/*?", async (req, res) => {
   try {
-    const folderPath = req.params[0] || "";
-    const githubUrl = folderPath
-      ? repoUrl(`/contents/${folderPath}`)
-      : repoUrl("/contents");
+    const folderPath = (req.params[0] || "").replace(/\/$/, "");
+    const prefix = folderPath ? folderPath + "/" : "";
 
-    const response = await axios.get(githubUrl, { headers: githubHeaders() });
+    let query = supabase
+      .from("seven_tunes_books")
+      .select("file_path, english_title, arabic_title, coptic_title");
 
-    if (!Array.isArray(response.data)) {
-      const file = response.data;
-      return res.json({
-        success: true,
-        type: "file",
-        item: {
-          name: file.name,
-          path: file.path,
-          id: pathToId(file.path),
-          size: file.size,
-          sha: file.sha,
-          apiUrl: file.url,
-          downloadUrl: file.download_url,
-          htmlUrl: file.html_url,
-        },
-      });
+    if (prefix) {
+      query = query.like("file_path", `${prefix}%`);
     }
 
-    const items = response.data.map((item) => ({
-      name: item.name,
-      path: item.path,
-      id: item.type === "file" ? pathToId(item.path) : null,
-      type: item.type,
-      size: item.size || null,
-      sha: item.sha,
-      apiUrl: item.url,
-      downloadUrl: item.download_url || null,
-      htmlUrl: item.html_url,
-    }));
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+
+    if (data.length === 0 && folderPath) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Folder not found" });
+    }
+
+    const subfolders = new Set();
+    const files = [];
+
+    for (const row of data) {
+      const relative = row.file_path.slice(prefix.length);
+      const parts = relative.split("/");
+
+      if (parts.length === 1) {
+        files.push({
+          name: parts[0],
+          path: row.file_path,
+          id: row.file_path.split("/").join(""),
+          type: "file",
+          english_title: row.english_title,
+          arabic_title: row.arabic_title,
+          coptic_title: row.coptic_title,
+        });
+      } else {
+        subfolders.add(parts[0]);
+      }
+    }
+
+    const items = [
+      ...[...subfolders].map((name) => ({
+        name,
+        path: prefix + name,
+        id: null,
+        type: "dir",
+      })),
+      ...files,
+    ];
 
     res.json({
       success: true,
@@ -554,12 +521,8 @@ app.get("/folders/*?", async (req, res) => {
       items,
     });
   } catch (error) {
-    console.error("GitHub contents error:", error.response?.data || error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch contents",
-      error: error.response?.data || error.message,
-    });
+    console.error("Folders error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -567,60 +530,41 @@ app.get("/folders/*?", async (req, res) => {
 // SAVE FILE
 // ─────────────────────────────────────────────
 
-app.post("/file", async (req, res) => {
+router.post("/file", async (req, res) => {
   try {
-    const { json, sha, path } = req.body;
+    const { json, path } = req.body;
 
-    if (!json || !sha || !path) {
+    if (!json || !path) {
       return res
         .status(400)
-        .json({ success: false, message: "Missing json, sha, or path" });
+        .json({ success: false, message: "Missing json or path" });
     }
-
     if (path.includes("..")) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid file path" });
+      return res.status(400).json({ success: false, message: "Invalid path" });
     }
 
-    const encoded = Buffer.from(JSON.stringify(json, null, 2)).toString(
-      "base64",
-    );
+    const filePath = path.replace(/\.json$/i, "");
 
-    const response = await axios.put(
-      repoUrl(`/contents/${path}`),
-      {
-        message: `Update ${path} via admin panel`,
-        content: encoded,
-        sha,
-        branch: process.env.GITHUB_BRANCH || "main",
-      },
-      { headers: githubHeaders() },
-    );
+    const { error } = await supabase
+      .from("seven_tunes_books")
+      .update({
+        content: json,
+        english_title: json.EnglishTitle ?? null,
+        arabic_title: json.ArabicTitle ?? null,
+        coptic_title: json.CopticTitle ?? null,
+      })
+      .eq("file_path", filePath);
 
-    // Fire-and-forget — update the manifest SHA for this file without blocking the save
-    regenerateAndCommitManifest().catch((err) =>
-      console.error("Manifest update after save failed:", err.message),
-    );
+    if (error) throw new Error(error.message);
 
     res.json({
       success: true,
       message: "File updated successfully",
-      // Return new SHA so the editor can do subsequent saves without a 409
-      sha: response.data.content?.sha,
+      path: filePath,
     });
   } catch (error) {
-    if (error.response?.status === 409) {
-      return res.status(409).json({
-        success: false,
-        message: "File was updated by someone else. Refresh and try again.",
-      });
-    }
-    console.error("GitHub save error:", error.response?.data || error);
-    res.status(error.response?.status || 500).json({
-      success: false,
-      message: error.response?.data?.message || "Failed to update file",
-    });
+    console.error("File save error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -628,65 +572,17 @@ app.post("/file", async (req, res) => {
 // CREATE FOLDER
 // ─────────────────────────────────────────────
 
-app.post("/create-folder", async (req, res) => {
+router.post("/create-folder", async (req, res) => {
   try {
     const { path } = req.body;
-
     if (!path) {
       return res.status(400).json({ success: false, message: "Missing path" });
     }
-    if (path.includes("..")) {
-      return res.status(400).json({ success: false, message: "Invalid path" });
-    }
-    if (!path.endsWith("/.gitkeep")) {
-      return res.status(400).json({
-        success: false,
-        message: "Folder path must end with /.gitkeep",
-      });
-    }
-
-    try {
-      await axios.get(repoUrl(`/contents/${path}`), {
-        headers: githubHeaders(),
-      });
-      return res.status(409).json({
-        success: false,
-        message: "A folder with that name already exists.",
-      });
-    } catch (checkErr) {
-      if (checkErr.response?.status !== 404) throw checkErr;
-    }
-
-    await axios.put(
-      repoUrl(`/contents/${path}`),
-      {
-        message: `Create folder ${path.replace("/.gitkeep", "")} via admin panel`,
-        content: Buffer.from("").toString("base64"),
-        branch: process.env.GITHUB_BRANCH || "main",
-      },
-      { headers: githubHeaders() },
-    );
-
-    // .gitkeep isn't a JSON file so it won't change the manifest's file list,
-    // but regenerate anyway to keep lastUpdated current
-    regenerateAndCommitManifest().catch((err) =>
-      console.error(
-        "Manifest update after folder creation failed:",
-        err.message,
-      ),
-    );
-
-    res.json({
-      success: true,
-      message: "Folder created",
-      path: path.replace("/.gitkeep", ""),
-    });
+    const folderPath = path.replace(/\/.gitkeep$/, "");
+    res.json({ success: true, message: "Folder ready", path: folderPath });
   } catch (error) {
-    console.error("Create folder error:", error.response?.data || error);
-    res.status(error.response?.status || 500).json({
-      success: false,
-      message: error.response?.data?.message || "Failed to create folder",
-    });
+    console.error("Create folder error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -694,7 +590,7 @@ app.post("/create-folder", async (req, res) => {
 // CREATE FILE
 // ─────────────────────────────────────────────
 
-app.post("/create-file", async (req, res) => {
+router.post("/create-file", async (req, res) => {
   try {
     const { path, json } = req.body;
 
@@ -710,58 +606,424 @@ app.post("/create-file", async (req, res) => {
         .json({ success: false, message: "File must be a .json file" });
     }
 
-    try {
-      await axios.get(repoUrl(`/contents/${path}`), {
-        headers: githubHeaders(),
-      });
-      return res.status(409).json({
-        success: false,
-        message: "A file with that name already exists.",
-      });
-    } catch (checkErr) {
-      if (checkErr.response?.status !== 404) throw checkErr;
-    }
-
+    const filePath = path.replace(/\.json$/i, "");
     const content = json ?? { Hymn: [] };
-    const encoded = Buffer.from(JSON.stringify(content, null, 2)).toString(
-      "base64",
-    );
 
-    const response = await axios.put(
-      repoUrl(`/contents/${path}`),
-      {
-        message: `Create ${path} via admin panel`,
-        content: encoded,
-        branch: process.env.GITHUB_BRANCH || "main",
-      },
-      { headers: githubHeaders() },
-    );
+    const { error } = await supabase.from("seven_tunes_books").insert({
+      file_path: filePath,
+      english_title: content.EnglishTitle ?? null,
+      arabic_title: content.ArabicTitle ?? null,
+      coptic_title: content.CopticTitle ?? null,
+      content,
+    });
 
-    // ✅ Await this — the new file must be in the manifest before the
-    // React Native app tries to fetch it
-    try {
-      await regenerateAndCommitManifest();
-    } catch (manifestErr) {
-      // Non-fatal: file exists, manifest will catch up on next push
-      console.error(
-        "Manifest update after file creation failed:",
-        manifestErr.message,
-      );
+    if (error) {
+      if (error.code === "23505") {
+        return res
+          .status(409)
+          .json({
+            success: false,
+            message: "A file with that name already exists.",
+          });
+      }
+      throw new Error(error.message);
     }
 
-    res.json({
-      success: true,
-      message: "File created",
-      path,
-      sha: response.data.content?.sha,
-    });
+    res.json({ success: true, message: "File created", path: filePath });
   } catch (error) {
-    console.error("Create file error:", error.response?.data || error);
-    res.status(error.response?.status || 500).json({
-      success: false,
-      message: error.response?.data?.message || "Failed to create file",
-    });
+    console.error("Create file error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
-module.exports = app;
+// ─────────────────────────────────────────────
+// RENAME FILE
+// ─────────────────────────────────────────────
+
+router.patch("/rename-file", async (req, res) => {
+  try {
+    const { oldPath, newPath } = req.body;
+
+    if (!oldPath || !newPath) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing oldPath or newPath" });
+    }
+    if (oldPath.includes("..") || newPath.includes("..")) {
+      return res.status(400).json({ success: false, message: "Invalid path" });
+    }
+
+    const oldFilePath = oldPath.replace(/\.json$/i, "");
+    const newFilePath = newPath.replace(/\.json$/i, "");
+
+    // Check new path doesn't already exist
+    const { data: existing } = await supabase
+      .from("seven_tunes_books")
+      .select("id")
+      .eq("file_path", newFilePath)
+      .maybeSingle();
+
+    if (existing) {
+      return res
+        .status(409)
+        .json({
+          success: false,
+          message: "A file with that name already exists.",
+        });
+    }
+
+    const { error } = await supabase
+      .from("seven_tunes_books")
+      .update({ file_path: newFilePath })
+      .eq("file_path", oldFilePath);
+
+    if (error) throw new Error(error.message);
+
+    res.json({
+      success: true,
+      message: "File renamed",
+      oldPath: oldFilePath,
+      newPath: newFilePath,
+    });
+  } catch (error) {
+    console.error("Rename file error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// RENAME FOLDER
+// Updates file_path prefix for ALL files under the folder.
+// ─────────────────────────────────────────────
+
+router.patch("/rename-folder", async (req, res) => {
+  try {
+    const { oldPath, newPath } = req.body;
+
+    if (!oldPath || !newPath) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing oldPath or newPath" });
+    }
+    if (oldPath.includes("..") || newPath.includes("..")) {
+      return res.status(400).json({ success: false, message: "Invalid path" });
+    }
+
+    // Fetch all files under old folder prefix
+    const { data: files, error: fetchError } = await supabase
+      .from("seven_tunes_books")
+      .select("id, file_path")
+      .like("file_path", `${oldPath}/%`);
+
+    if (fetchError) throw new Error(fetchError.message);
+
+    if (!files || files.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "No files found under that folder." });
+    }
+
+    // Remap each file_path: swap old prefix for new prefix
+    const updates = files.map((file) => ({
+      id: file.id,
+      file_path: newPath + file.file_path.slice(oldPath.length),
+    }));
+
+    const { error: updateError } = await supabase
+      .from("seven_tunes_books")
+      .upsert(updates, { onConflict: "id" });
+
+    if (updateError) throw new Error(updateError.message);
+
+    res.json({
+      success: true,
+      message: `Folder renamed — ${files.length} file(s) updated`,
+      oldPath,
+      newPath,
+      filesUpdated: files.length,
+    });
+  } catch (error) {
+    console.error("Rename folder error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// SEARCH PREVIEW
+// Searches content across files, returns matches + snippets.
+// No writes — use before applying replace.
+// ─────────────────────────────────────────────
+
+router.post("/search-preview", async (req, res) => {
+  try {
+    const { search, scope, scopePath, caseSensitive } = req.body;
+
+    if (!search || !search.trim()) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Search text cannot be empty." });
+    }
+
+    let query = supabase.from("seven_tunes_books").select("file_path, content");
+
+    if (scope === "current" && scopePath) {
+      query = query.like("file_path", `${scopePath}/%`);
+    }
+
+    const { data: files, error } = await query;
+    if (error) throw new Error(error.message);
+
+    const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const flags = caseSensitive ? "g" : "gi";
+    const regex = new RegExp(escapedSearch, flags);
+
+    const matches = [];
+
+    for (const file of files) {
+      const contentStr = JSON.stringify(file.content);
+      const found = contentStr.match(regex);
+      if (!found) continue;
+
+      const matchCount = found.length;
+      const idx = caseSensitive
+        ? contentStr.indexOf(search)
+        : contentStr.toLowerCase().indexOf(search.toLowerCase());
+      const start = Math.max(0, idx - 40);
+      const end = Math.min(contentStr.length, idx + search.length + 40);
+      const preview = "…" + contentStr.slice(start, end) + "…";
+
+      matches.push({ file_path: file.file_path, matchCount, preview });
+    }
+
+    matches.sort((a, b) => b.matchCount - a.matchCount);
+
+    res.json({ success: true, matches, totalFiles: files.length });
+  } catch (error) {
+    console.error("Search preview error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// SEARCH & REPLACE
+// Applies find/replace across file content in Supabase.
+// Skips any file where replacement would produce invalid JSON.
+// ─────────────────────────────────────────────
+
+router.post("/search-replace", async (req, res) => {
+  try {
+    const { search, replace, scope, scopePath, caseSensitive } = req.body;
+
+    if (!search || !search.trim()) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Search text cannot be empty." });
+    }
+
+    let query = supabase
+      .from("seven_tunes_books")
+      .select("id, file_path, content");
+
+    if (scope === "current" && scopePath) {
+      query = query.like("file_path", `${scopePath}/%`);
+    }
+
+    const { data: files, error: fetchError } = await query;
+    if (fetchError) throw new Error(fetchError.message);
+
+    const replaceWith = replace ?? "";
+    const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const flags = caseSensitive ? "g" : "gi";
+    const regex = new RegExp(escapedSearch, flags);
+
+    const toUpdate = [];
+
+    for (const file of files) {
+      const original = JSON.stringify(file.content);
+      const updated = original.replace(regex, replaceWith);
+      if (updated === original) continue;
+
+      try {
+        toUpdate.push({
+          id: file.id,
+          file_path: file.file_path,
+          content: JSON.parse(updated),
+        });
+      } catch {
+        console.warn(
+          `[Search-Replace] Skipped ${file.file_path} — replacement produced invalid JSON.`,
+        );
+      }
+    }
+
+    if (toUpdate.length === 0) {
+      return res.json({
+        success: true,
+        updated: 0,
+        message: "No matches found.",
+      });
+    }
+
+    const BATCH = 50;
+    for (let i = 0; i < toUpdate.length; i += BATCH) {
+      const batch = toUpdate.slice(i, i + BATCH);
+      const { error: updateError } = await supabase
+        .from("seven_tunes_books")
+        .upsert(batch, { onConflict: "id" });
+      if (updateError) throw new Error(updateError.message);
+    }
+
+    console.log(
+      `[Search-Replace] "${search}" → "${replaceWith}" in ${toUpdate.length} file(s).`,
+    );
+
+    res.json({
+      success: true,
+      updated: toUpdate.length,
+      message: `Replaced in ${toUpdate.length} file(s).`,
+    });
+  } catch (error) {
+    console.error("Search-replace error:", error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// MIGRATE
+// One-time seed from GitHub → Supabase.
+// Delete after use.
+// ─────────────────────────────────────────────
+
+router.post("/migrate", async (req, res) => {
+  const { startFrom = null, dryRun = false } = req.body ?? {};
+
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Transfer-Encoding", "chunked");
+
+  const log = (msg) => {
+    console.log(msg);
+    res.write(JSON.stringify({ log: msg }) + "\n");
+  };
+
+  try {
+    const branch = process.env.GITHUB_BRANCH || "main";
+    log(`[Migration] Fetching repo tree (branch: ${branch})…`);
+
+    const treeResponse = await axios.get(
+      repoUrl(`/git/trees/${branch}?recursive=1`),
+      { headers: githubHeaders() },
+    );
+
+    if (treeResponse.data.truncated) {
+      log(
+        "[Migration] ⚠️  GitHub tree was truncated — some files may be missed.",
+      );
+    }
+
+    let filePaths = treeResponse.data.tree
+      .filter(
+        (item) =>
+          item.type === "blob" &&
+          item.path.endsWith(".json") &&
+          item.path !== MANIFEST_REPO_PATH,
+      )
+      .map((item) => item.path);
+
+    log(`[Migration] Found ${filePaths.length} JSON files.`);
+
+    if (startFrom) {
+      const idx = filePaths.indexOf(startFrom);
+      if (idx === -1) {
+        log(`[Migration] ⚠️  startFrom not found — starting from beginning.`);
+      } else {
+        filePaths = filePaths.slice(idx);
+        log(
+          `[Migration] Resuming from "${startFrom}" (${filePaths.length} remaining).`,
+        );
+      }
+    }
+
+    if (dryRun) log(`[Migration] DRY RUN — nothing will be written.`);
+
+    const CONCURRENCY = 5;
+    const DELAY_MS = 300;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let succeeded = 0;
+    let failed = 0;
+    const errors = [];
+
+    const chunks = [];
+    for (let i = 0; i < filePaths.length; i += CONCURRENCY) {
+      chunks.push(filePaths.slice(i, i + CONCURRENCY));
+    }
+
+    for (let ci = 0; ci < chunks.length; ci++) {
+      log(`[Migration] Chunk ${ci + 1}/${chunks.length}`);
+
+      await Promise.all(
+        chunks[ci].map(async (filePath) => {
+          try {
+            const fileResponse = await axios.get(
+              repoUrl(`/contents/${filePath}`),
+              { headers: githubHeaders() },
+            );
+
+            const raw = Buffer.from(fileResponse.data.content, "base64")
+              .toString("utf-8")
+              .replace(/^\uFEFF/, "")
+              .trim();
+
+            const content = JSON.parse(raw);
+
+            const row = {
+              file_path: filePath.replace(/\.json$/i, ""),
+              english_title: content.EnglishTitle ?? null,
+              arabic_title: content.ArabicTitle ?? null,
+              coptic_title: content.CopticTitle ?? null,
+              content,
+            };
+
+            if (!dryRun) {
+              const { error } = await supabase
+                .from("seven_tunes_books")
+                .upsert(row, { onConflict: "file_path" });
+              if (error) throw new Error(error.message);
+            }
+
+            log(`  ✓ ${filePath}`);
+            succeeded++;
+          } catch (err) {
+            const msg = err.message || String(err);
+            log(`  ✗ ${filePath} — ${msg}`);
+            errors.push({ path: filePath, error: msg });
+            failed++;
+          }
+        }),
+      );
+
+      if (ci < chunks.length - 1) await sleep(DELAY_MS);
+    }
+
+    log(`[Migration] Done — ✓ ${succeeded} succeeded, ✗ ${failed} failed.`);
+    if (failed > 0) {
+      log(`[Migration] Resume with: { "startFrom": "${errors[0].path}" }`);
+    }
+
+    res.end(
+      JSON.stringify({
+        success: true,
+        dryRun,
+        total: filePaths.length,
+        succeeded,
+        failed,
+        ...(errors.length > 0 && { errors }),
+      }),
+    );
+  } catch (error) {
+    const msg = error.response?.data?.message || error.message;
+    log(`[Migration] Fatal: ${msg}`);
+    res.end(JSON.stringify({ success: false, error: msg }));
+  }
+});
+
+module.exports = router;
