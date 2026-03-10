@@ -676,7 +676,7 @@ app.post("/resetPassword", async (req, res) => {
 /**
  * Get logged in user info
  */
-app.get("/getLoggedIn", authenticateToken, async (req, res) => {
+app.get("/getLoggedIn", async (req, res) => {
   try {
     const userId = req.user.id;
 
