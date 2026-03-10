@@ -28,7 +28,7 @@ const sendAnnouncementNotification = async (title, body, isEdit = false) => {
 
     console.log(
       `Sending ${isEdit ? "update" : "new"} announcement notification:`,
-      requestBody
+      requestBody,
     );
 
     const response = await axios.post(notificationEndpoint, requestBody, {
@@ -59,13 +59,6 @@ app.post("/addAnnouncment", async (req, res) => {
       valid = true, // Default to true if not specified
       image_url,
     } = req.body;
-
-    // Validate required fields
-    if (!english_title || !english_description) {
-      return res.status(400).send({
-        error: "English title and description are required",
-      });
-    }
 
     // Insert announcement into database
     const { data, error } = await supabase.supabase
@@ -137,12 +130,12 @@ app.post("/addAnnouncment", async (req, res) => {
       const notificationResult = await sendAnnouncementNotification(
         english_title,
         english_description,
-        false // isEdit = false for new announcements
+        false, // isEdit = false for new announcements
       );
 
       if (!notificationResult.success) {
         console.warn(
-          "Notification failed but announcement was created successfully"
+          "Notification failed but announcement was created successfully",
         );
       }
     }
@@ -254,12 +247,12 @@ app.post("/editAnnouncment/:id", async (req, res) => {
       const notificationResult = await sendAnnouncementNotification(
         english_title || data.english_title,
         english_description || data.english_description,
-        true // isEdit = true for updates
+        true, // isEdit = true for updates
       );
 
       if (!notificationResult.success) {
         console.warn(
-          "Notification failed but announcement was updated successfully"
+          "Notification failed but announcement was updated successfully",
         );
       }
     }
@@ -472,7 +465,7 @@ app.post("/addServiceAnnouncment", async (req, res) => {
         if (uploadError) {
           console.error(
             "Service announcement image upload error:",
-            uploadError
+            uploadError,
           );
           throw new Error("Error uploading image to storage");
         }
@@ -493,14 +486,14 @@ app.post("/addServiceAnnouncment", async (req, res) => {
         if (updateError) {
           console.error(
             "Service announcement image URL update error:",
-            updateError
+            updateError,
           );
           throw new Error("Error updating image URL in database");
         }
       } catch (imageError) {
         console.error(
           "Service announcement image processing failed:",
-          imageError
+          imageError,
         );
         console.log("Continuing without image due to upload failure");
       }
@@ -512,7 +505,7 @@ app.post("/addServiceAnnouncment", async (req, res) => {
         const serviceNotificationEndpoint = process.env.NOTIFICATION_ENDPOINT
           ? `${process.env.NOTIFICATION_ENDPOINT.replace(
               "/sendPushNotification",
-              ""
+              "",
             )}/sendSubscribedServicePushNotification/${service_id}`
           : `http://localhost:3000/notifications/sendSubscribedServicePushNotification/${service_id}`;
 
@@ -536,14 +529,14 @@ app.post("/addServiceAnnouncment", async (req, res) => {
             headers: {
               "Content-Type": "application/json",
             },
-          }
+          },
         );
 
         console.log("Service notification sent successfully:", response.data);
       } catch (notificationError) {
         console.error(
           "Failed to send service notification:",
-          notificationError.message
+          notificationError.message,
         );
         // Don't fail the main operation if notification fails
       }
