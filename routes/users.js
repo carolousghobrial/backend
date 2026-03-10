@@ -556,6 +556,7 @@ app.post("/resetPassword", async (req, res) => {
 
     console.log("=== Password Reset Request ===");
 
+    // Validate input
     if (!token) {
       return res.status(400).json({
         success: false,
@@ -570,7 +571,7 @@ app.post("/resetPassword", async (req, res) => {
       });
     }
 
-    // Validate password strength
+    // Password rules
     if (new_password.length < 8) {
       return res.status(400).json({
         success: false,
@@ -589,7 +590,7 @@ app.post("/resetPassword", async (req, res) => {
       });
     }
 
-    // First, verify the token is valid
+    // Validate token
     const {
       data: { user },
       error: getUserError,
@@ -597,66 +598,40 @@ app.post("/resetPassword", async (req, res) => {
 
     if (getUserError || !user) {
       console.error("Token validation failed:", getUserError);
+
       return res.status(400).json({
         success: false,
-        message: "Invalid or expired token. Please request a new reset link.",
+        message: "Invalid or expired reset link. Please request a new one.",
       });
     }
 
-    console.log("Token valid for user:", user.email);
+    console.log("Token valid for:", user.email);
 
-    // Update the password using Supabase Auth API directly
-    // This requires making a direct call to Supabase's auth endpoint
-    const supabaseUrl =
-      process.env.SUPABASE_URL || supabase.supabase.supabaseUrl;
-    const supabaseKey =
-      process.env.SUPABASE_ANON_KEY || supabase.supabase.supabaseKey;
-
-    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        apikey: supabaseKey,
-      },
-      body: JSON.stringify({
+    // Update password using admin API
+    const { error: updateError } =
+      await supabase.supabase.auth.admin.updateUserById(user.id, {
         password: new_password,
-      }),
-    });
+      });
 
-    const result = await response.json();
-
-    if (!response.ok) {
-      console.error("Password update failed:", result);
-
-      // Handle specific error cases
-      if (
-        result.error_description?.includes("expired") ||
-        result.msg?.includes("expired")
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Your reset link has expired. Please request a new one.",
-        });
-      }
+    if (updateError) {
+      console.error("Password update failed:", updateError);
 
       return res.status(400).json({
         success: false,
-        message: result.message || result.msg || "Failed to update password.",
+        message: updateError.message || "Failed to update password",
       });
     }
 
     console.log("✅ Password updated successfully for:", user.email);
 
-    // Sign out all sessions for security
+    // Sign out all sessions
     try {
       await supabase.supabase.auth.admin.signOut(user.id, "global");
     } catch (signOutError) {
-      console.warn("Could not sign out all sessions:", signOutError);
-      // Continue anyway - password was still reset
+      console.warn("Could not sign out sessions:", signOutError);
     }
 
-    res.json({
+    return res.json({
       success: true,
       message:
         "Password reset successful! You can now login with your new password.",
@@ -664,7 +639,8 @@ app.post("/resetPassword", async (req, res) => {
     });
   } catch (error) {
     console.error("Reset password error:", error);
-    res.status(500).json({
+
+    return res.status(500).json({
       success: false,
       message: "An error occurred while resetting the password.",
     });
