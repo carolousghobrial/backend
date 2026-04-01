@@ -4,7 +4,7 @@ const app = express();
 const multer = require("multer");
 const path = require("path");
 const { createClient } = require("@supabase/supabase-js");
-
+const fs = require("fs");
 const supabase = require("../config/config");
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -103,10 +103,10 @@ app.post("/syncAllHymnIdsToSevenTunes", async (req, res) => {
     // { "agpeya/sixth-hour/kyrie.json": [1, 4, 17], ... }
     const filePathMap = {};
     for (const hymn of hymns) {
-      if (!filePathMap[hymn.tune_file_path]) {
-        filePathMap[hymn.tune_file_path] = [];
+      for (const filePath of hymn.tune_file_path || []) {
+        if (!filePathMap[filePath]) filePathMap[filePath] = [];
+        filePathMap[filePath].push(hymn.id);
       }
-      filePathMap[hymn.tune_file_path].push(hymn.id);
     }
 
     const results = { updated: [], notFound: [], errors: [] };
@@ -193,7 +193,8 @@ app.get("/getHymnsWithMediaStatus", async (req, res) => {
       ...hymn,
       has_recordings: hymnIdsWithRecordings.has(hymn.id),
       has_hazzat: hymnIdsWithHazzat.has(hymn.id),
-      has_tune_file: !!hymn.tune_file_path,
+      has_tune_file:
+        Array.isArray(hymn.tune_file_path) && hymn.tune_file_path.length > 0,
     }));
 
     res.json({ success: true, data: enriched });
@@ -203,13 +204,67 @@ app.get("/getHymnsWithMediaStatus", async (req, res) => {
 });
 app.patch("/updateHymnMeta/:id", async (req, res) => {
   try {
-    const { id } = req.params;
-    const { tune_file_path, folder_id } = req.body;
+    const id = parseInt(req.params.id, 10);
+    const { add_tune_path, remove_tune_path, folder_id, ...coreFields } =
+      req.body;
 
+    // ── Tune-path mutations (append or remove one item) ───────────────────────
+    if (add_tune_path !== undefined || remove_tune_path !== undefined) {
+      // Fetch the current array first
+      const { data: current, error: fetchErr } = await supabase.supabase
+        .from("deacons_school_hymns")
+        .select("tune_file_path")
+        .eq("id", id)
+        .single();
+
+      if (fetchErr) throw new Error(fetchErr.message);
+
+      const oldPaths = Array.isArray(current.tune_file_path)
+        ? current.tune_file_path
+        : [];
+      let newPaths = [...oldPaths];
+
+      if (add_tune_path && !newPaths.includes(add_tune_path)) {
+        newPaths.push(add_tune_path);
+      }
+
+      if (remove_tune_path) {
+        newPaths = newPaths.filter((p) => p !== remove_tune_path);
+      }
+
+      const { data, error } = await supabase.supabase
+        .from("deacons_school_hymns")
+        .update({ tune_file_path: newPaths })
+        .eq("id", id)
+        .select()
+        .single();
+
+      if (error) throw new Error(error.message);
+
+      // Sync diff to seven_tunes_books
+      await syncHymnIdToSevenTunes(newPaths, oldPaths, id);
+
+      return res.json({ success: true, data });
+    }
+
+    // ── Other meta fields (folder_id, core auto-save fields) ─────────────────
     const updates = {};
-    if (tune_file_path !== undefined)
-      updates.tune_file_path = tune_file_path || null;
     if (folder_id !== undefined) updates.folder_id = folder_id || null;
+
+    const allowedCore = [
+      "hymn_name",
+      "hymn_ritual",
+      "level_hymn_in",
+      "points",
+      "order_taught",
+    ];
+    for (const field of allowedCore) {
+      if (coreFields[field] !== undefined) updates[field] = coreFields[field];
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.json({ success: true, data: null });
+    }
 
     const { data, error } = await supabase.supabase
       .from("deacons_school_hymns")
@@ -219,20 +274,6 @@ app.patch("/updateHymnMeta/:id", async (req, res) => {
       .single();
 
     if (error) throw new Error(error.message);
-    // Sync to 7 Tunes if tune_file_path changed
-    if (tune_file_path !== undefined) {
-      const { data: oldHymn } = await supabase.supabase
-        .from("deacons_school_hymns")
-        .select("tune_file_path")
-        .eq("id", id)
-        .single();
-
-      await syncHymnIdToSevenTunes(
-        tune_file_path || null,
-        oldHymn?.tune_file_path || null,
-        parseInt(id),
-      );
-    }
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -524,7 +565,6 @@ app.put(
         hazzat: finalHazzatUrl,
         points: points ? parseInt(points) : 0,
         order_taught: order_taught ? parseInt(order_taught) : 0,
-        tune_file_path: tune_file_path || null,
         folder_id: folder_id ? parseInt(folder_id) : null,
         // Never pass created_at — let Postgres keep the original value
       };
@@ -3616,42 +3656,121 @@ app.get("/getTuneFiles", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-async function syncHymnIdToSevenTunes(newFilePath, oldFilePath, hymnId) {
-  // Remove from old file's array
-  if (oldFilePath) {
-    const { data: oldRow } = await supabaseTunes
+async function syncHymnIdToSevenTunes(newPaths, oldPaths, hymnId) {
+  const safeNew = Array.isArray(newPaths) ? newPaths : [];
+  const safeOld = Array.isArray(oldPaths) ? oldPaths : [];
+
+  const pathsToRemove = safeOld.filter((p) => !safeNew.includes(p));
+  const pathsToAdd = safeNew.filter((p) => !safeOld.includes(p));
+
+  // Remove hymnId from any paths that were unlinked
+  for (const filePath of pathsToRemove) {
+    const { data: row } = await supabaseTunes
       .from("seven_tunes_books")
       .select("id, hymn_ids")
-      .eq("file_path", oldFilePath)
+      .eq("file_path", filePath)
       .single();
 
-    if (oldRow) {
+    if (row) {
       await supabaseTunes
         .from("seven_tunes_books")
         .update({
-          hymn_ids: (oldRow.hymn_ids || []).filter((id) => id !== hymnId),
+          hymn_ids: (row.hymn_ids || []).filter((id) => id !== hymnId),
         })
-        .eq("id", oldRow.id);
+        .eq("id", row.id);
     }
   }
 
-  // Add to new file's array
-  if (newFilePath) {
-    const { data: newRow } = await supabaseTunes
+  // Add hymnId to any paths that were newly linked
+  for (const filePath of pathsToAdd) {
+    const { data: row } = await supabaseTunes
       .from("seven_tunes_books")
       .select("id, hymn_ids")
-      .eq("file_path", newFilePath)
+      .eq("file_path", filePath)
       .single();
 
-    if (newRow) {
-      const existing = newRow.hymn_ids || [];
+    if (row) {
+      const existing = row.hymn_ids || [];
       if (!existing.includes(hymnId)) {
         await supabaseTunes
           .from("seven_tunes_books")
           .update({ hymn_ids: [...existing, hymnId] })
-          .eq("id", newRow.id);
+          .eq("id", row.id);
       }
     }
   }
 }
+
+const BUCKET = "deacons_school_hymns_files";
+
+app.get("/download-hazzat", async (req, res) => {
+  try {
+    const allFiles = await listAllFiles();
+
+    if (allFiles.length === 0) {
+      return res.status(404).json({ error: "No files found in bucket" });
+    }
+
+    const outputDir = path.join(__dirname, "downloads", BUCKET);
+    const results = { success: [], failed: [] };
+
+    for (const filePath of allFiles) {
+      try {
+        const { data, error } = await supabase.supabase.storage
+          .from(BUCKET)
+          .download(filePath);
+
+        if (error) throw error;
+
+        const localPath = path.join(outputDir, filePath);
+        fs.mkdirSync(path.dirname(localPath), { recursive: true });
+
+        const buffer = Buffer.from(await data.arrayBuffer());
+        fs.writeFileSync(localPath, buffer);
+
+        results.success.push(filePath);
+        console.log(`✓ ${filePath}`);
+      } catch (err) {
+        console.error(`✗ ${filePath}:`, err.message);
+        results.failed.push({ file: filePath, error: err.message });
+      }
+    }
+
+    return res.json({
+      total: allFiles.length,
+      downloaded: results.success.length,
+      failed: results.failed.length,
+      savedTo: outputDir,
+      results,
+    });
+  } catch (err) {
+    console.error("Download error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+async function listAllFiles(folder = "") {
+  const { data, error } = await supabase.supabase.storage
+    .from(BUCKET)
+    .list(folder, { limit: 1000, offset: 0 });
+
+  if (error) throw error;
+  if (!data) return [];
+
+  let files = [];
+
+  for (const item of data) {
+    const itemPath = folder ? `${folder}/${item.name}` : item.name;
+
+    if (item.metadata) {
+      files.push(itemPath);
+    } else {
+      const nested = await listAllFiles(itemPath);
+      files = files.concat(nested);
+    }
+  }
+
+  return files;
+}
+
 module.exports = app;
