@@ -74,6 +74,124 @@ app.post("/createHymnFolder", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+app.post(
+  "/createHymn",
+  upload.fields([
+    { name: "hymn_file", maxCount: 1 },
+    { name: "hazzat_file", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const {
+        hymn_name,
+        hymn_recording,
+        level_hymn_in,
+        hymn_ritual,
+        points,
+        order_taught,
+        folder_id,
+        tune_file_path,
+      } = req.body;
+
+      if (!hymn_name?.trim()) {
+        return res
+          .status(400)
+          .json({ success: false, error: "hymn_name is required" });
+      }
+
+      let finalHymnFileUrl = null;
+      let finalHazzatUrl = null;
+
+      const uploadTasks = [];
+
+      if (req.files?.["hymn_file"]?.[0]) {
+        uploadTasks.push(
+          (async () => {
+            const file = req.files["hymn_file"][0];
+            const ext = path.extname(file.originalname);
+            const filePath = `hymns_files_json/hymn_new_${Date.now()}${ext}`;
+            const { error } = await supabase.supabase.storage
+              .from("hymns_files_json")
+              .upload(filePath, file.buffer, {
+                contentType: file.mimetype,
+                upsert: true,
+              });
+            if (!error) {
+              const { data } = supabase.supabase.storage
+                .from("hymns_files_json")
+                .getPublicUrl(filePath);
+              finalHymnFileUrl = data.publicUrl;
+            }
+          })(),
+        );
+      }
+
+      if (req.files?.["hazzat_file"]?.[0]) {
+        uploadTasks.push(
+          (async () => {
+            const file = req.files["hazzat_file"][0];
+            const ext = path.extname(file.originalname);
+            const filePath = `hazzat_files/hazzat_new_${Date.now()}${ext}`;
+            const { error } = await supabase.supabase.storage
+              .from("deacons_school_hymns_files")
+              .upload(filePath, file.buffer, {
+                contentType: file.mimetype,
+                upsert: true,
+              });
+            if (!error) {
+              const { data } = supabase.supabase.storage
+                .from("deacons_school_hymns_files")
+                .getPublicUrl(filePath);
+              finalHazzatUrl = data.publicUrl;
+            }
+          })(),
+        );
+      }
+
+      if (uploadTasks.length) await Promise.all(uploadTasks);
+
+      const parsedTunePaths = tune_file_path
+        ? Array.isArray(tune_file_path)
+          ? tune_file_path
+          : [tune_file_path]
+        : [];
+
+      const { data, error } = await supabase.supabase
+        .from("deacons_school_hymns")
+        .insert([
+          {
+            hymn_name: hymn_name.trim(),
+            hymn_recording: hymn_recording || null,
+            level_hymn_in: level_hymn_in || null,
+            hymn_ritual: hymn_ritual || null,
+            hymn_file_location: finalHymnFileUrl,
+            hazzat: finalHazzatUrl,
+            points: points ? parseInt(points) : 0,
+            order_taught: order_taught ? parseInt(order_taught) : 0,
+            folder_id: folder_id ? parseInt(folder_id) : null,
+            tune_file_path: parsedTunePaths,
+          },
+        ])
+        .select()
+        .single();
+
+      if (error) {
+        console.error("DB insert error:", error.message);
+        return res.status(500).json({ success: false, error: error.message });
+      }
+
+      // Sync tune_file_path to seven_tunes_books
+      if (parsedTunePaths.length > 0) {
+        await syncHymnIdToSevenTunes(parsedTunePaths, [], data.id);
+      }
+
+      res.json({ success: true, data, message: "Hymn created successfully" });
+    } catch (err) {
+      console.error("Error in createHymn:", err.message);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  },
+);
 
 // ─── Delete folder ───
 app.delete("/deleteHymnFolder/:id", async (req, res) => {
@@ -287,7 +405,8 @@ app.get("/getHymnRecordings/:hymnId", async (req, res) => {
     .from("deacons_school_hymn_recordings")
     .select("*")
     .eq("hymn_id", req.params.hymnId)
-    .order("created_at");
+    .order("created_at", { ascending: false })
+    .limit(1);
   if (error)
     return res.status(500).json({ success: false, error: error.message });
   res.json({ success: true, data });
@@ -380,7 +499,8 @@ app.get("/getHymnHazzat/:hymnId", async (req, res) => {
     .from("deacons_school_hymn_hazzat")
     .select("*")
     .eq("hymn_id", req.params.hymnId)
-    .order("created_at");
+    .order("created_at", { ascending: false })
+    .limit(1);
   if (error)
     return res.status(500).json({ success: false, error: error.message });
   res.json({ success: true, data });
@@ -3618,7 +3738,7 @@ app.put("/updateAssessmentItem/:itemId", async (req, res) => {
 // PATCH /renameHymnFolder/:id
 app.patch("/renameHymnFolder/:id", async (req, res) => {
   const { name } = req.body;
-  const { data, error } = await supabase
+  const { data, error } = await supabase.supabase
     .from("hymns_folder")
     .update({ name })
     .eq("id", req.params.id)
@@ -3632,7 +3752,7 @@ app.patch("/renameHymnFolder/:id", async (req, res) => {
 // PATCH /assignHymnFolder
 app.patch("/assignHymnFolder", async (req, res) => {
   const { file_path, folder_id } = req.body;
-  const { data, error } = await supabase
+  const { data, error } = await supabase.supabase
     .from("deacons_school_hymns")
     .update({ folder_id: folder_id ?? null })
     .eq("tune_file_path", file_path)
