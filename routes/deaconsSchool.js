@@ -210,10 +210,15 @@ app.delete("/deleteHymnFolder/:id", async (req, res) => {
 app.post("/syncAllHymnIdsToSevenTunes", async (req, res) => {
   try {
     // 1. Fetch all hymns that have a tune_file_path
-    const { data: hymns, error: hymnsError } = await supabase.supabase
-      .from("deacons_school_hymns")
-      .select("id, tune_file_path")
-      .not("tune_file_path", "is", null);
+// AFTER
+const { data: rawHymns, error: hymnsError } = await supabase.supabase
+  .from("deacons_school_hymns")
+  .select("id, tune_file_path")
+  .not("tune_file_path", "is", null);
+
+const hymns = (rawHymns || []).filter(h =>
+  Array.isArray(h.tune_file_path) && h.tune_file_path.filter(Boolean).length > 0
+);
 
     if (hymnsError) throw new Error(hymnsError.message);
 
@@ -312,7 +317,7 @@ app.get("/getHymnsWithMediaStatus", async (req, res) => {
       has_recordings: hymnIdsWithRecordings.has(hymn.id),
       has_hazzat: hymnIdsWithHazzat.has(hymn.id),
       has_tune_file:
-        Array.isArray(hymn.tune_file_path) && hymn.tune_file_path.length > 0,
+has_tune_file: Array.isArray(hymn.tune_file_path) && hymn.tune_file_path.filter(Boolean).length > 0,
     }));
 
     res.json({ success: true, data: enriched });
@@ -337,9 +342,9 @@ app.patch("/updateHymnMeta/:id", async (req, res) => {
 
       if (fetchErr) throw new Error(fetchErr.message);
 
-      const oldPaths = Array.isArray(current.tune_file_path)
-        ? current.tune_file_path
-        : [];
+const oldPaths = Array.isArray(current.tune_file_path)
+  ? current.tune_file_path.filter(Boolean)
+  : [];
       let newPaths = [...oldPaths];
 
       if (add_tune_path && !newPaths.includes(add_tune_path)) {
