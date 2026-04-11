@@ -3744,6 +3744,7 @@ app.put("/updateAssessmentItem/:itemId", async (req, res) => {
 });
 // PATCH /renameHymnFolder/:id
 app.patch("/renameHymnFolder/:id", async (req, res) => {
+  b;
   const { name } = req.body;
   const { data, error } = await supabase.supabase
     .from("hymns_folder")
