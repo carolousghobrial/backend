@@ -506,8 +506,7 @@ app.get("/getHymnHazzat/:hymnId", async (req, res) => {
     .from("deacons_school_hymn_hazzat")
     .select("*")
     .eq("hymn_id", req.params.hymnId)
-    .order("created_at", { ascending: false })
-    .limit(1);
+    .order("created_at", { ascending: false });
   if (error)
     return res.status(500).json({ success: false, error: error.message });
   res.json({ success: true, data });
