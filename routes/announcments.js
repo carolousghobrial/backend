@@ -6,6 +6,34 @@ const notifications = require("./notifications");
 const { decode } = require("base64-arraybuffer");
 const axios = require("axios");
 
+const authenticateToken = async (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) {
+    return res
+      .status(401)
+      .json({ success: false, message: "Access token is required" });
+  }
+  try {
+    const {
+      data: { user },
+      error,
+    } = await supabase.supabase.auth.getUser(token);
+    if (error || !user) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired token" });
+    }
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (err) {
+    return res
+      .status(403)
+      .json({ success: false, message: "Token verification failed" });
+  }
+};
+
 app.get("/", (req, res) => {
   res.send("Hello World!");
 });
@@ -47,7 +75,7 @@ const sendAnnouncementNotification = async (title, body, isEdit = false) => {
   }
 };
 
-app.post("/addAnnouncment", async (req, res) => {
+app.post("/addAnnouncment", authenticateToken, async (req, res) => {
   try {
     // Extract announcement data from request body
     const {
@@ -157,7 +185,7 @@ app.post("/addAnnouncment", async (req, res) => {
   }
 });
 
-app.post("/editAnnouncment/:id", async (req, res) => {
+app.post("/editAnnouncment/:id", authenticateToken, async (req, res) => {
   try {
     const id = req.params.id;
     const {
@@ -346,7 +374,12 @@ app.get("/getValidAnnouncments", async (req, res) => {
   }
 });
 
-app.post("/toggleValid", async (req, res) => {
+const ALLOWED_TOGGLE_TABLES = new Set([
+  "announcments",
+  "service_announcements",
+]);
+
+app.post("/toggleValid", authenticateToken, async (req, res) => {
   try {
     const { id, newStatus, tableName = "announcments" } = req.body;
 
@@ -354,6 +387,12 @@ app.post("/toggleValid", async (req, res) => {
       return res.status(400).send({
         error: "ID and newStatus (boolean) are required",
       });
+    }
+
+    if (!ALLOWED_TOGGLE_TABLES.has(tableName)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid tableName" });
     }
 
     console.log(`Toggling ${tableName} ID ${id} to ${newStatus}`);
@@ -416,7 +455,7 @@ app.get("/getValidServiceAnnouncments/:id", async (req, res) => {
   }
 });
 
-app.post("/addServiceAnnouncment", async (req, res) => {
+app.post("/addServiceAnnouncment", authenticateToken, async (req, res) => {
   try {
     const { service_id, message, url, valid = true, image_url } = req.body;
 
@@ -587,7 +626,7 @@ app.get("/getServiceAnnouncments/:id", async (req, res) => {
   }
 });
 
-app.delete("/deleteAnnouncment/:id", async (req, res) => {
+app.delete("/deleteAnnouncment/:id", authenticateToken, async (req, res) => {
   try {
     const id = req.params.id;
 

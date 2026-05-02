@@ -19,6 +19,7 @@ const visitations = require("./routes/visitations");
 const monthlyBlogArticle = require("./routes/monthlyBlogArticle");
 const confessions = require("./routes/confessions");
 const attendance = require("./routes/attendance");
+const contactUs = require("./routes/contactUs");
 
 const bodyParser = require("body-parser");
 
@@ -204,6 +205,7 @@ app.use("/attendance", attendance);
 app.use("/monthlyBlogArticle", monthlyBlogArticle);
 app.use("/deaconsSchool", deaconsSchool);
 app.use("/github", github);
+app.use("/contactUs", contactUs);
 
 // Root endpoint
 app.get("/", (req, res) => {

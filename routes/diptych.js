@@ -3,6 +3,34 @@ const bp = require("body-parser");
 const app = express();
 const supabase = require("../config/config");
 
+const authenticateToken = async (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) {
+    return res
+      .status(401)
+      .json({ success: false, message: "Access token is required" });
+  }
+  try {
+    const {
+      data: { user },
+      error,
+    } = await supabase.supabase.auth.getUser(token);
+    if (error || !user) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired token" });
+    }
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (err) {
+    return res
+      .status(403)
+      .json({ success: false, message: "Token verification failed" });
+  }
+};
+
 app.post("/adddiptych", async (req, res) => {
   diptych = {
     departed_name: req.body.departed_name,
@@ -22,7 +50,7 @@ app.post("/adddiptych", async (req, res) => {
   }
 });
 
-app.get("/getdiptychs", async (req, res) => {
+app.get("/getdiptychs", authenticateToken, async (req, res) => {
   const { data, error } = await supabase.supabase.from("diptych").select("*");
   if (error) {
     res.status(500).send(error.message);
@@ -30,7 +58,7 @@ app.get("/getdiptychs", async (req, res) => {
     res.send(data);
   }
 });
-app.delete("/deletediptych/:id", async (req, res) => {
+app.delete("/deletediptych/:id", authenticateToken, async (req, res) => {
   const id = req.params.id;
   console.log(id);
   const { data, error } = await supabase.supabase
@@ -44,7 +72,7 @@ app.delete("/deletediptych/:id", async (req, res) => {
   } else {
   }
 });
-app.post("/deleteDiptychs", async (req, res) => {
+app.post("/deleteDiptychs", authenticateToken, async (req, res) => {
   try {
     console.log("here");
     const { ids } = req.body; // array of IDs

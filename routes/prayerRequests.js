@@ -3,6 +3,34 @@ const bp = require("body-parser");
 const app = express();
 const supabase = require("../config/config");
 
+const authenticateToken = async (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) {
+    return res
+      .status(401)
+      .json({ success: false, message: "Access token is required" });
+  }
+  try {
+    const {
+      data: { user },
+      error,
+    } = await supabase.supabase.auth.getUser(token);
+    if (error || !user) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired token" });
+    }
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (err) {
+    return res
+      .status(403)
+      .json({ success: false, message: "Token verification failed" });
+  }
+};
+
 app.get("/", (req, res) => {
   res.send("Hello World!");
 });
@@ -26,7 +54,7 @@ app.post("/addPrayer", async (req, res) => {
   }
 });
 
-app.get("/getPrayers", async (req, res) => {
+app.get("/getPrayers", authenticateToken, async (req, res) => {
   const { data, error } = await supabase.supabase
     .from("prayerRequests")
     .select("*");
@@ -36,7 +64,7 @@ app.get("/getPrayers", async (req, res) => {
     res.send(data);
   }
 });
-app.delete("/deletePrayer/:id", async (req, res) => {
+app.delete("/deletePrayer/:id", authenticateToken, async (req, res) => {
   const id = req.params.id;
   const { data, error } = await supabase.supabase
     .from("prayerRequests")
@@ -48,7 +76,7 @@ app.delete("/deletePrayer/:id", async (req, res) => {
   } else {
   }
 });
-app.post("/deletePrayers", async (req, res) => {
+app.post("/deletePrayers", authenticateToken, async (req, res) => {
   try {
     console.log("here");
     const { ids } = req.body; // array of IDs

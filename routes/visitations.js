@@ -152,38 +152,76 @@ app.delete("/deleteSlot/:id", async (req, res) => {
 
 /** GET confirmed visitation requests (with slot info) */
 app.get("/getConfirmedVisitationRequest", async (req, res) => {
-  const { data, error } = await supabase.supabase
+  const { page = 0, limit = 100 } = req.query;
+  const pageNum = Math.max(0, parseInt(page, 10) || 0);
+  const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
+  const from = pageNum * limitNum;
+  const to = from + limitNum - 1;
+  const { data, error, count } = await supabase.supabase
     .from("visitation_reservation")
-    .select("*, visitation_slots(*)")
+    .select(
+      "id, user_id, slot_id, reason, address, confirmed, created_at, visitation_slots(id, date, start_time, end_time)",
+      { count: "exact" },
+    )
     .eq("confirmed", true)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .range(from, to);
   if (error)
     return res.status(500).json({ success: false, message: error.message });
-  res.json(data);
+  res.json({
+    success: true,
+    data,
+    pagination: { page: pageNum, limit: limitNum, total: count },
+  });
 });
 
 /** GET unconfirmed / pending visitation requests */
 app.get("/getUnconfirmedVisitationRequest", async (req, res) => {
-  const { data, error } = await supabase.supabase
+  const { page = 0, limit = 100 } = req.query;
+  const pageNum = Math.max(0, parseInt(page, 10) || 0);
+  const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
+  const from = pageNum * limitNum;
+  const to = from + limitNum - 1;
+  const { data, error, count } = await supabase.supabase
     .from("visitation_reservation")
-    .select("*, visitation_slots(*)")
+    .select(
+      "id, user_id, slot_id, reason, address, confirmed, created_at, visitation_slots(id, date, start_time, end_time)",
+      { count: "exact" },
+    )
     .eq("confirmed", false)
-    .eq("rejected", false)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .range(from, to);
   if (error)
     return res.status(500).json({ success: false, message: error.message });
-  res.json(data);
+  res.json({
+    success: true,
+    data,
+    pagination: { page: pageNum, limit: limitNum, total: count },
+  });
 });
 
 /** GET all requests (priest dashboard) */
 app.get("/getAllRequests", async (req, res) => {
-  const { data, error } = await supabase.supabase
+  const { page = 0, limit = 100 } = req.query;
+  const pageNum = Math.max(0, parseInt(page, 10) || 0);
+  const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
+  const from = pageNum * limitNum;
+  const to = from + limitNum - 1;
+  const { data, error, count } = await supabase.supabase
     .from("visitation_reservation")
-    .select("*, visitation_slots(*)")
-    .order("created_at", { ascending: false });
+    .select(
+      "id, user_id, slot_id, reason, address, confirmed, created_at, visitation_slots(id, date, start_time, end_time)",
+      { count: "exact" },
+    )
+    .order("created_at", { ascending: false })
+    .range(from, to);
   if (error)
     return res.status(500).json({ success: false, message: error.message });
-  res.json(data);
+  res.json({
+    success: true,
+    data,
+    pagination: { page: pageNum, limit: limitNum, total: count },
+  });
 });
 
 /** POST congregation requests a visitation slot */
@@ -220,12 +258,10 @@ app.post("/requestVisitation", async (req, res) => {
 app.post("/addManualVisitation", async (req, res) => {
   const { user_id, date, time, reason, address, notes } = req.body;
   if (!user_id || !date || !time) {
-    return res
-      .status(400)
-      .json({
-        success: false,
-        message: "user_id, date, and time are required",
-      });
+    return res.status(400).json({
+      success: false,
+      message: "user_id, date, and time are required",
+    });
   }
 
   // Create a slot first

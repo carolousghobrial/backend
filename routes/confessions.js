@@ -34,7 +34,7 @@ function generateAvailableSlots(
   targetDays,
   startTime,
   endTime,
-  slotDuration
+  slotDuration,
 ) {
   const availableSlots = [];
 
@@ -49,7 +49,7 @@ function generateAvailableSlots(
         currentDate,
         startTime,
         endTime,
-        slotDuration
+        slotDuration,
       );
       availableSlots.push(...slots);
     }
@@ -117,7 +117,7 @@ app.post("/api/availability/generate", async (req, res) => {
       targetDays,
       startTime,
       endTime,
-      slotDuration
+      slotDuration,
     );
 
     // Save to Supabase
@@ -423,7 +423,20 @@ app.post("/api/confessions/schedule", async (req, res) => {
 // Get confessions for a date range
 app.get("/api/confessions", async (req, res) => {
   try {
-    const { startDate, endDate, status, userId, priestId } = req.query;
+    const {
+      startDate,
+      endDate,
+      status,
+      userId,
+      priestId,
+      page = 0,
+      limit = 100,
+    } = req.query;
+
+    const pageNum = Math.max(0, parseInt(page, 10) || 0);
+    const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
+    const from = pageNum * limitNum;
+    const to = from + limitNum - 1;
 
     let query = supabase.supabase
       .from("confessions")
@@ -432,10 +445,12 @@ app.get("/api/confessions", async (req, res) => {
         *,
         users:user_id (first_name, last_name, email, cellphone),
         confession_availability_slots:availability_slot_id (slot_date, start_time, end_time, location)
-      `
+      `,
+        { count: "exact" },
       )
       .order("confession_date", { ascending: true })
-      .order("confession_time", { ascending: true });
+      .order("confession_time", { ascending: true })
+      .range(from, to);
 
     if (startDate) query = query.gte("confession_date", startDate);
     if (endDate) query = query.lte("confession_date", endDate);
@@ -443,13 +458,14 @@ app.get("/api/confessions", async (req, res) => {
     if (userId) query = query.eq("user_id", userId);
     if (priestId) query = query.eq("priest_id", priestId);
 
-    const { data, error } = await query;
+    const { data, error, count } = await query;
 
     if (error) throw error;
 
     res.json({
       success: true,
       data: data,
+      pagination: { page: pageNum, limit: limitNum, total: count },
     });
   } catch (error) {
     res.status(500).json({
@@ -471,7 +487,7 @@ app.get("/api/confessions/:confessionId", async (req, res) => {
         *,
         users:user_id (first_name, last_name, email, cellphone, dob),
         confession_availability_slots:availability_slot_id (slot_date, start_time, end_time, location)
-      `
+      `,
       )
       .eq("id", confessionId)
       .single();
@@ -722,7 +738,7 @@ app.get("/api/users/:userId/confessions", async (req, res) => {
         `
         *,
         confession_availability_slots:availability_slot_id (slot_date, start_time, location)
-      `
+      `,
       )
       .eq("user_id", userId)
       .order("confession_date", { ascending: false })
@@ -761,7 +777,7 @@ app.post("/addAvailableSlots", async (req, res) => {
     targetDays,
     startTime,
     endTime,
-    slotDuration
+    slotDuration,
   );
 
   const { data, error } = await supabase.supabase
@@ -832,7 +848,7 @@ app.post("/requestConfession", async (req, res) => {
           user_id,
           availability_slot_id: slot_id,
         }),
-      }
+      },
     );
 
     const result = await response.json();
