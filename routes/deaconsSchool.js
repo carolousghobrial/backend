@@ -3481,41 +3481,46 @@ app.post("/submitBatchScores", async (req, res) => {
       );
     }
 
-    const validationErrors = [];
+    const skippedRows = [];
 
     // Prepare scores with scored_by and date
-    const processedScores = scores.map((score, index) => {
-      if (
-        !score?.student_id ||
-        !score?.course_id ||
-        !score?.item_id ||
-        score?.points_earned === undefined
-      ) {
-        validationErrors.push({
+    const processedScores = scores.reduce((acc, score, index) => {
+      const hasRequiredIds =
+        score?.student_id && score?.course_id && score?.item_id;
+      const rawPointsEarned = score?.points_earned;
+      const isBlankPointsEarned =
+        rawPointsEarned === undefined ||
+        rawPointsEarned === null ||
+        `${rawPointsEarned}`.trim() === "";
+
+      // Frontend sometimes sends placeholder rows or untouched cells in bulk payload.
+      // Skip them instead of failing the entire batch.
+      if (!hasRequiredIds || isBlankPointsEarned) {
+        skippedRows.push({
           index,
-          error:
-            "Each score must include student_id, course_id, item_id, and points_earned",
+          item_id: score?.item_id || null,
+          reason: "Missing required identifiers or empty points_earned",
         });
-        return null;
+        return acc;
       }
 
-      const parsedPointsEarned = Number.parseFloat(score.points_earned);
+      const parsedPointsEarned = Number.parseFloat(rawPointsEarned);
       if (!Number.isFinite(parsedPointsEarned)) {
-        validationErrors.push({
+        skippedRows.push({
           index,
           item_id: score.item_id,
-          error: "points_earned must be a valid number",
+          reason: "points_earned must be a valid number",
         });
-        return null;
+        return acc;
       }
 
       if (Math.abs(parsedPointsEarned) > NUMERIC_8_2_MAX) {
-        validationErrors.push({
+        skippedRows.push({
           index,
           item_id: score.item_id,
-          error: `points_earned is out of range for numeric(8,2). Max allowed is ${NUMERIC_8_2_MAX}`,
+          reason: `points_earned is out of range for numeric(8,2). Max allowed is ${NUMERIC_8_2_MAX}`,
         });
-        return null;
+        return acc;
       }
 
       const itemMeta = assessmentItemMap.get(score.item_id);
@@ -3552,52 +3557,54 @@ app.post("/submitBatchScores", async (req, res) => {
       }
 
       if (!Number.isFinite(pointsPossible) || pointsPossible <= 0) {
-        validationErrors.push({
+        skippedRows.push({
           index,
           item_id: score.item_id,
-          error: "points_possible must be a positive number",
+          reason: "points_possible must be a positive number",
         });
-        return null;
+        return acc;
       }
 
       if (Math.abs(pointsPossible) > NUMERIC_8_2_MAX) {
-        validationErrors.push({
+        skippedRows.push({
           index,
           item_id: score.item_id,
-          error: `points_possible is out of range for numeric(8,2). Max allowed is ${NUMERIC_8_2_MAX}`,
+          reason: `points_possible is out of range for numeric(8,2). Max allowed is ${NUMERIC_8_2_MAX}`,
         });
-        return null;
+        return acc;
       }
 
       if (!itemMeta?.is_extra_credit && parsedPointsEarned > pointsPossible) {
-        validationErrors.push({
+        skippedRows.push({
           index,
           item_id: score.item_id,
-          error:
+          reason:
             "points_earned cannot exceed points_possible for non-extra-credit items",
         });
-        return null;
+        return acc;
       }
 
       const roundedPointsEarned = Math.round(parsedPointsEarned * 100) / 100;
       const roundedPointsPossible = Math.round(pointsPossible * 100) / 100;
       const resolvedScoredBy = score?.scored_by || scored_by || "system";
 
-      return {
+      acc.push({
         ...score,
         quarter_id: score?.quarter_id || null,
         points_earned: roundedPointsEarned,
         points_possible: roundedPointsPossible,
         scored_by: resolvedScoredBy,
         scored_date: new Date().toISOString().split("T")[0],
-      };
-    });
+      });
 
-    if (validationErrors.length > 0) {
+      return acc;
+    }, []);
+
+    if (processedScores.length === 0) {
       return res.status(400).json({
         success: false,
-        error: "One or more scores are invalid",
-        details: validationErrors.slice(0, 25),
+        error: "No valid scores were provided",
+        details: skippedRows.slice(0, 25),
       });
     }
 
@@ -3623,6 +3630,8 @@ app.post("/submitBatchScores", async (req, res) => {
     res.json({
       success: true,
       message: `${data.length} scores submitted successfully`,
+      skipped_count: skippedRows.length,
+      skipped_details: skippedRows.slice(0, 10),
       data,
     });
   } catch (err) {
