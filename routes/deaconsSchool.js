@@ -3413,6 +3413,7 @@ app.post("/submitStudentScore", async (req, res) => {
 app.post("/submitBatchScores", async (req, res) => {
   try {
     const { scores, scored_by } = req.body;
+    const NUMERIC_8_2_MAX = 999999.99;
 
     if (!Array.isArray(scores) || scores.length === 0) {
       return res.status(400).json({
@@ -3421,23 +3422,202 @@ app.post("/submitBatchScores", async (req, res) => {
       });
     }
 
+    if (!scored_by) {
+      return res.status(400).json({
+        success: false,
+        error: "scored_by is required",
+      });
+    }
+
+    const itemIds = [...new Set(scores.map((s) => s?.item_id).filter(Boolean))];
+    const { data: assessmentItems, error: assessmentItemsError } =
+      await supabase.supabase
+        .from("ds_assessment_items")
+        .select(
+          "item_id, item_reference, reference_id, max_points, is_extra_credit",
+        )
+        .in("item_id", itemIds);
+
+    if (assessmentItemsError) {
+      console.error(
+        "Error fetching assessment items for batch scores:",
+        assessmentItemsError,
+      );
+      return res
+        .status(500)
+        .json({ success: false, error: assessmentItemsError.message });
+    }
+
+    const assessmentItemMap = new Map(
+      (assessmentItems || []).map((item) => [item.item_id, item]),
+    );
+
+    const hymnReferenceIds = [
+      ...new Set(
+        (assessmentItems || [])
+          .filter(
+            (item) =>
+              item.item_reference === "deacons_school_hymns" &&
+              typeof item.reference_id === "string" &&
+              item.reference_id.trim().length > 0,
+          )
+          .map((item) => item.reference_id),
+      ),
+    ];
+
+    let hymnPointsMap = new Map();
+    if (hymnReferenceIds.length > 0) {
+      const { data: hymnPoints, error: hymnPointsError } =
+        await supabase.supabase
+          .from("deacons_school_hymns")
+          .select("id, points")
+          .in("id", hymnReferenceIds);
+
+      if (hymnPointsError) {
+        console.error(
+          "Error fetching hymn points for batch scores:",
+          hymnPointsError,
+        );
+        return res
+          .status(500)
+          .json({ success: false, error: hymnPointsError.message });
+      }
+
+      hymnPointsMap = new Map(
+        (hymnPoints || []).map((hymn) => [hymn.id, hymn.points]),
+      );
+    }
+
+    const validationErrors = [];
+
     // Prepare scores with scored_by and date
-    const processedScores = scores.map((score) => ({
-      ...score,
-      points_earned: parseFloat(score.points_earned),
-      scored_by,
-      scored_date: new Date().toISOString().split("T")[0],
-    }));
+    const processedScores = scores.map((score, index) => {
+      if (
+        !score?.student_id ||
+        !score?.course_id ||
+        !score?.quarter_id ||
+        !score?.item_id ||
+        score?.points_earned === undefined
+      ) {
+        validationErrors.push({
+          index,
+          error:
+            "Each score must include student_id, course_id, quarter_id, item_id, and points_earned",
+        });
+        return null;
+      }
+
+      const parsedPointsEarned = Number.parseFloat(score.points_earned);
+      if (!Number.isFinite(parsedPointsEarned)) {
+        validationErrors.push({
+          index,
+          item_id: score.item_id,
+          error: "points_earned must be a valid number",
+        });
+        return null;
+      }
+
+      if (Math.abs(parsedPointsEarned) > NUMERIC_8_2_MAX) {
+        validationErrors.push({
+          index,
+          item_id: score.item_id,
+          error: `points_earned is out of range for numeric(8,2). Max allowed is ${NUMERIC_8_2_MAX}`,
+        });
+        return null;
+      }
+
+      const itemMeta = assessmentItemMap.get(score.item_id);
+      const hymnPoints = itemMeta?.reference_id
+        ? hymnPointsMap.get(itemMeta.reference_id)
+        : null;
+
+      const normalizedPointsPossibleInput =
+        score.points_possible !== undefined && score.points_possible !== null
+          ? Number.parseFloat(score.points_possible)
+          : null;
+
+      let pointsPossible = 100;
+      if (Number.isFinite(normalizedPointsPossibleInput)) {
+        pointsPossible = normalizedPointsPossibleInput;
+      } else if (
+        itemMeta?.max_points !== undefined &&
+        itemMeta?.max_points !== null
+      ) {
+        const maxPoints = Number.parseFloat(itemMeta.max_points);
+        if (Number.isFinite(maxPoints)) {
+          pointsPossible = maxPoints;
+        }
+      } else if (hymnPoints !== undefined && hymnPoints !== null) {
+        const hymnNumericPoints = Number.parseFloat(hymnPoints);
+        if (Number.isFinite(hymnNumericPoints)) {
+          pointsPossible = hymnNumericPoints;
+        }
+      }
+
+      if (!Number.isFinite(pointsPossible) || pointsPossible <= 0) {
+        validationErrors.push({
+          index,
+          item_id: score.item_id,
+          error: "points_possible must be a positive number",
+        });
+        return null;
+      }
+
+      if (Math.abs(pointsPossible) > NUMERIC_8_2_MAX) {
+        validationErrors.push({
+          index,
+          item_id: score.item_id,
+          error: `points_possible is out of range for numeric(8,2). Max allowed is ${NUMERIC_8_2_MAX}`,
+        });
+        return null;
+      }
+
+      if (!itemMeta?.is_extra_credit && parsedPointsEarned > pointsPossible) {
+        validationErrors.push({
+          index,
+          item_id: score.item_id,
+          error:
+            "points_earned cannot exceed points_possible for non-extra-credit items",
+        });
+        return null;
+      }
+
+      const roundedPointsEarned = Math.round(parsedPointsEarned * 100) / 100;
+      const roundedPointsPossible = Math.round(pointsPossible * 100) / 100;
+
+      return {
+        ...score,
+        points_earned: roundedPointsEarned,
+        points_possible: roundedPointsPossible,
+        scored_by,
+        scored_date: new Date().toISOString().split("T")[0],
+      };
+    });
+
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: "One or more scores are invalid",
+        details: validationErrors.slice(0, 25),
+      });
+    }
 
     const { data, error } = await supabase.supabase
       .from("ds_student_scores")
       .upsert(processedScores, {
-        onConflict: "student_id, course_id, item_id",
+        onConflict: "student_id,course_id,quarter_id,item_id",
       })
       .select();
 
     if (error) {
       console.error("Error submitting batch scores:", error);
+      if (error.message && error.message.includes("numeric field overflow")) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "One or more score values are too large. Please verify points_earned and points_possible values.",
+        });
+      }
       return res.status(500).json({ success: false, error: error.message });
     }
 
