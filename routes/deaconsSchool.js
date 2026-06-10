@@ -3617,13 +3617,51 @@ app.post("/submitBatchScores", async (req, res) => {
 
     if (error) {
       console.error("Error submitting batch scores:", error);
+
       if (error.message && error.message.includes("numeric field overflow")) {
-        return res.status(400).json({
-          success: false,
-          error:
-            "One or more score values are too large. Please verify points_earned and points_possible values.",
+        const savedRows = [];
+
+        for (let i = 0; i < processedScores.length; i++) {
+          const row = processedScores[i];
+          const { data: rowData, error: rowError } = await supabase.supabase
+            .from("ds_student_scores")
+            .upsert([row], {
+              onConflict: "student_id,course_id,item_id",
+            })
+            .select();
+
+          if (rowError) {
+            skippedRows.push({
+              index: i,
+              item_id: row.item_id,
+              reason: rowError.message,
+            });
+            continue;
+          }
+
+          if (rowData && rowData[0]) {
+            savedRows.push(rowData[0]);
+          }
+        }
+
+        if (savedRows.length === 0) {
+          return res.status(400).json({
+            success: false,
+            error:
+              "All score rows failed to save. Please verify score values and item setup.",
+            details: skippedRows.slice(0, 25),
+          });
+        }
+
+        return res.json({
+          success: true,
+          message: `${savedRows.length} scores submitted successfully`,
+          skipped_count: skippedRows.length,
+          skipped_details: skippedRows.slice(0, 10),
+          data: savedRows,
         });
       }
+
       return res.status(500).json({ success: false, error: error.message });
     }
 
