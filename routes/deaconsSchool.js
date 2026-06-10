@@ -3422,13 +3422,6 @@ app.post("/submitBatchScores", async (req, res) => {
       });
     }
 
-    if (!scored_by) {
-      return res.status(400).json({
-        success: false,
-        error: "scored_by is required",
-      });
-    }
-
     const itemIds = [...new Set(scores.map((s) => s?.item_id).filter(Boolean))];
     const { data: assessmentItems, error: assessmentItemsError } =
       await supabase.supabase
@@ -3495,14 +3488,13 @@ app.post("/submitBatchScores", async (req, res) => {
       if (
         !score?.student_id ||
         !score?.course_id ||
-        !score?.quarter_id ||
         !score?.item_id ||
         score?.points_earned === undefined
       ) {
         validationErrors.push({
           index,
           error:
-            "Each score must include student_id, course_id, quarter_id, item_id, and points_earned",
+            "Each score must include student_id, course_id, item_id, and points_earned",
         });
         return null;
       }
@@ -3536,7 +3528,7 @@ app.post("/submitBatchScores", async (req, res) => {
           ? Number.parseFloat(score.points_possible)
           : null;
 
-      let pointsPossible = 100;
+      let pointsPossible = null;
       if (Number.isFinite(normalizedPointsPossibleInput)) {
         pointsPossible = normalizedPointsPossibleInput;
       } else if (
@@ -3552,6 +3544,11 @@ app.post("/submitBatchScores", async (req, res) => {
         if (Number.isFinite(hymnNumericPoints)) {
           pointsPossible = hymnNumericPoints;
         }
+      }
+
+      if (!Number.isFinite(pointsPossible)) {
+        // Keep compatibility with older clients that don't send points_possible.
+        pointsPossible = Math.max(100, parsedPointsEarned);
       }
 
       if (!Number.isFinite(pointsPossible) || pointsPossible <= 0) {
@@ -3584,12 +3581,14 @@ app.post("/submitBatchScores", async (req, res) => {
 
       const roundedPointsEarned = Math.round(parsedPointsEarned * 100) / 100;
       const roundedPointsPossible = Math.round(pointsPossible * 100) / 100;
+      const resolvedScoredBy = score?.scored_by || scored_by || "system";
 
       return {
         ...score,
+        quarter_id: score?.quarter_id || null,
         points_earned: roundedPointsEarned,
         points_possible: roundedPointsPossible,
-        scored_by,
+        scored_by: resolvedScoredBy,
         scored_date: new Date().toISOString().split("T")[0],
       };
     });
@@ -3605,7 +3604,7 @@ app.post("/submitBatchScores", async (req, res) => {
     const { data, error } = await supabase.supabase
       .from("ds_student_scores")
       .upsert(processedScores, {
-        onConflict: "student_id,course_id,quarter_id,item_id",
+        onConflict: "student_id,course_id,item_id",
       })
       .select();
 
