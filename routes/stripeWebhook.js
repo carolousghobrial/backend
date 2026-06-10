@@ -1,8 +1,16 @@
 const express = require("express");
 const app = express();
 const bodyParser = require("body-parser");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const supabase = require("../config/config");
+
+const getStripeClient = () => {
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeSecretKey) {
+    return null;
+  }
+
+  return require("stripe")(stripeSecretKey);
+};
 
 // Webhook signature secret (from Stripe Dashboard)
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -12,6 +20,14 @@ app.post(
   "/webhook",
   bodyParser.raw({ type: "application/json" }),
   async (req, res) => {
+    const stripe = getStripeClient();
+    if (!stripe || !webhookSecret) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe webhook is not configured on the server",
+      });
+    }
+
     const sig = req.headers["stripe-signature"];
 
     try {

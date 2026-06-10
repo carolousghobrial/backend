@@ -2,11 +2,27 @@ const express = require("express");
 const bp = require("body-parser");
 const app = express();
 const supabase = require("../config/config");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+
+const getStripeClient = () => {
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeSecretKey) {
+    return null;
+  }
+
+  return require("stripe")(stripeSecretKey);
+};
 
 // Create a Stripe PaymentIntent for $5 registration fee
 app.post("/createPaymentIntent", async (req, res) => {
   try {
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        message: "Stripe is not configured on the server",
+      });
+    }
+
     const paymentIntent = await stripe.paymentIntents.create({
       amount: 500, // $5.00 in cents
       currency: "usd",
@@ -29,6 +45,14 @@ app.post("/createPaymentIntent", async (req, res) => {
 
 app.post("/addAltarResponse", async (req, res) => {
   try {
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        message: "Stripe is not configured on the server",
+      });
+    }
+
     const { full_name, phone_number, dob, church, payment_intent_id } =
       req.body;
 
