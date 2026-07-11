@@ -24,7 +24,6 @@ const stripeWebhook = require("./routes/stripeWebhook");
 
 const bodyParser = require("body-parser");
 
-
 // ==================== MIDDLEWARE SETUP ====================
 
 // Trust proxy (important for Heroku deployment)
@@ -81,49 +80,6 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Credentials", "true");
 
   // Handle preflight requests
-  if (req.method === "OPTIONS") {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-});
-
-// Alternative: Environment-based configuration (RECOMMENDED)
-app.use((req, res, next) => {
-  let allowedOrigins = [];
-
-  if (isDevelopment) {
-    allowedOrigins = [
-      "http://localhost:4200",
-      "http://localhost:3000",
-      "http://127.0.0.1:4200",
-      "http://127.0.0.1:3000",
-    ];
-  } else {
-    allowedOrigins = [
-      "https://www.stgeorgecocnashville.org",
-      "https://stgeorgecocnashville.org",
-    ].filter(Boolean); // Remove undefined values
-  }
-
-  const origin = req.headers.origin;
-
-  if (!origin || allowedOrigins.includes(origin)) {
-    res.header("Access-Control-Allow-Origin", origin || "*");
-  }
-
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Access-Token, X-Key",
-  );
-
-  res.header(
-    "Access-Control-Allow-Methods",
-    "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-  );
-
-  res.header("Access-Control-Allow-Credentials", "true");
-
   if (req.method === "OPTIONS") {
     res.sendStatus(200);
   } else {
@@ -302,6 +258,21 @@ const server = app.listen(port, () => {
 📚 API docs: http://localhost:${port}/
   `);
 });
+
+// Keep-alive self-ping to prevent Heroku dyno from sleeping (every 25 minutes)
+if (!isDevelopment) {
+  const KEEP_ALIVE_URL =
+    "https://stgntbackend-a14a35aa352d.herokuapp.com/health";
+  setInterval(
+    () => {
+      axios.get(KEEP_ALIVE_URL).catch((err) => {
+        console.warn("Keep-alive ping failed:", err.message);
+      });
+    },
+    25 * 60 * 1000,
+  );
+  console.log("Keep-alive ping scheduled every 25 minutes.");
+}
 
 // Handle server errors
 server.on("error", (error) => {
