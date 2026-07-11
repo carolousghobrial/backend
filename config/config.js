@@ -1,19 +1,57 @@
 const { createClient } = require("@supabase/supabase-js");
-const supabaseUrl = "https://oplzcugljytvywvewdkj.supabase.co";
+require("dotenv").config();
+
+const port = process.env.PORT || "3000";
+const nodeEnv = process.env.NODE_ENV || "development";
+const isDevelopment = nodeEnv === "development";
+
+const jwtSecret = process.env.JWT_SECRET;
+const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9wbHpjdWdsanl0dnl3dmV3ZGtqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTcwNTUwOTY4OSwiZXhwIjoyMDIxMDg1Njg5fQ.rIcLqb-QOCTC9ApvfeQpoNGrqqmtou-iBR_kLNH6fBs";
-const supabase = createClient(supabaseUrl, supabaseKey, {
-  auth: {
-    persistSession: true, // keeps session in memory (frontend only, no effect on Node backend)
-    autoRefreshToken: true, // automatically refreshes token (frontend only)
-    detectSessionInUrl: true, // frontend use for OAuth redirects
-  },
-});
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
-module.exports = {
-  supabase,
-};
+const missingVars = [];
+if (!supabaseUrl) missingVars.push("SUPABASE_URL");
+if (!supabaseKey) missingVars.push("SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY)");
+if (!jwtSecret) missingVars.push("JWT_SECRET");
+if (missingVars.length > 0) {
+  console.warn(
+    `Missing environment variables: ${missingVars.join(", ")}. Routes depending on these will fail at runtime.`,
+  );
+}
 
-module.exports = {
-  supabase: supabase,
-};
+if (!supabaseUrl || !supabaseKey) {
+  console.warn(
+    "Supabase environment variables not set. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) to enable DB access.",
+  );
+
+  // Export a proxy that throws when any property is accessed to avoid crashing the app
+  // at module load time while still providing a clear runtime error when DB is used.
+  const supabaseProxy = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "Supabase client not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) in your environment.",
+        );
+      },
+      apply() {
+        throw new Error(
+          "Supabase client not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) in your environment.",
+        );
+      },
+    },
+  );
+
+  module.exports = { supabase: supabaseProxy, port, nodeEnv, isDevelopment, jwtSecret };
+} else {
+  const supabase = createClient(supabaseUrl, supabaseKey, {
+    auth: {
+      persistSession: true, // keeps session in memory (frontend only, no effect on Node backend)
+      autoRefreshToken: true, // automatically refreshes token (frontend only)
+      detectSessionInUrl: true, // frontend use for OAuth redirects
+    },
+  });
+
+  module.exports = { supabase, port, nodeEnv, isDevelopment, jwtSecret };
+}

@@ -31,5 +31,8 @@ yarn-error.*
 # local env files
 .env*.local
 .env
+
+# Supabase MCP config (contains secrets)
+mcp.supabase.json
 # typescript
 *.tsbuildinfo

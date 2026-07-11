@@ -3,19 +3,86 @@ const bp = require("body-parser");
 const app = express();
 const multer = require("multer");
 const path = require("path");
-const { createClient } = require("@supabase/supabase-js");
+
 const fs = require("fs");
 const supabase = require("../config/config");
+const {
+  authenticateToken,
+  requireDeaconsSchoolWrite,
+  requireTeacherAssignedToCourse,
+  requireTeacherAssignedToCourseForBatch,
+} = require("../middleware/auth");
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
-// At the top of the file, add a second Supabase client for 7 Tunes
-const supabaseTunes = createClient(
-  process.env.SUPABASE_URL_BOOKS,
-  process.env.SUPABASE_SERVICE_KEY_BOOKS,
-);
+
+// ─── Storage helpers ──────────────────────────────────────────────────────────
+function extractStoragePath(publicUrl, bucketName) {
+  if (!publicUrl) return null;
+  const marker = `/object/public/${bucketName}/`;
+  const idx = publicUrl.indexOf(marker);
+  return idx === -1
+    ? null
+    : decodeURIComponent(publicUrl.slice(idx + marker.length));
+}
+
+async function deleteStorageFile(bucket, publicUrl) {
+  const filePath = extractStoragePath(publicUrl, bucket);
+  if (!filePath) return;
+  await supabase.supabase.storage
+    .from(bucket)
+    .remove([filePath])
+    .catch((err) =>
+      console.warn(
+        `Storage cleanup failed [${bucket}/${filePath}]:`,
+        err.message,
+      ),
+    );
+}
+
+// ─── Pagination helper ────────────────────────────────────────────────────────
+function parsePagination(query, defaultLimit = 50) {
+  const page = Math.max(1, parseInt(query.page) || 1);
+  const limit = Math.min(
+    200,
+    Math.max(1, parseInt(query.limit) || defaultLimit),
+  );
+  return { page, limit, from: (page - 1) * limit, to: page * limit - 1 };
+}
+const { supabase: supabaseTunes } = require("../config/config");
+
+// Routes that handle their own auth (exempted from global mutation middleware)
+const AUTH_EXEMPT_ROUTES = new Set([
+  "/submitBatchScores",
+  "/submitStudentScore",
+  "/yearEnd/finalizeAllGrades",
+  "/reenrollment/bulk",
+  "/newYear/setupCourses",
+  "/enrollStudent",
+  "/unenrollStudent",
+  "/selfEnroll",
+]);
+
+app.use((req, res, next) => {
+  const isMutation = ["POST", "PATCH", "PUT", "DELETE"].includes(req.method);
+  if (!isMutation) {
+    return next();
+  }
+
+  // Check if route starts with any exempt prefix
+  const isExempt = [...AUTH_EXEMPT_ROUTES].some(
+    (route) => req.path === route || req.path.startsWith(route + "/"),
+  );
+  if (isExempt) {
+    return next();
+  }
+
+  return authenticateToken(req, res, () => {
+    return requireDeaconsSchoolWrite(req, res, next);
+  });
+});
 
 // ─── GET: All tune files from 7 Tunes project (for the picker) ───
 app.get("/getTuneFiles", async (req, res) => {
@@ -370,6 +437,16 @@ app.patch("/updateHymnMeta/:id", async (req, res) => {
       // Sync diff to seven_tunes_books
       await syncHymnIdToSevenTunes(newPaths, oldPaths, id);
 
+      // Delete removed tune file from storage (best-effort)
+      if (remove_tune_path) {
+        await supabase.supabase.storage
+          .from("hymns_files_json")
+          .remove([remove_tune_path])
+          .catch((err) =>
+            console.warn("Tune file storage cleanup failed:", err.message),
+          );
+      }
+
       return res.json({ success: true, data });
     }
 
@@ -556,12 +633,28 @@ app.post("/addHymnHazzat", upload.single("hazzat_file"), async (req, res) => {
 });
 
 app.delete("/deleteHymnHazzat/:id", async (req, res) => {
+  const { data: hazzat, error: fetchErr } = await supabase.supabase
+    .from("deacons_school_hymn_hazzat")
+    .select("url")
+    .eq("id", req.params.id)
+    .single();
+
+  if (fetchErr)
+    return res.status(500).json({ success: false, error: fetchErr.message });
+
   const { error } = await supabase.supabase
     .from("deacons_school_hymn_hazzat")
     .delete()
     .eq("id", req.params.id);
+
   if (error)
     return res.status(500).json({ success: false, error: error.message });
+
+  // Clean up storage file (best-effort — DB record already deleted)
+  if (hazzat?.url) {
+    await deleteStorageFile("deacons_school_hymns_files", hazzat.url);
+  }
+
   res.json({ success: true });
 });
 const daysOfWeek = [
@@ -625,6 +718,13 @@ app.put(
         _old_tune_file_path,
       } = req.body;
 
+      // ── Fetch existing record so we can clean up old storage files ──────────
+      const { data: existingHymn } = await supabase.supabase
+        .from("deacons_school_hymns")
+        .select("hymn_file_location, hazzat")
+        .eq("id", id)
+        .single();
+
       // ── Parallel file uploads ─────────────────────────────────────────────
       let finalHymnFileUrl = hymn_file_location || null;
       let finalHazzatUrl = hazzat || null;
@@ -648,6 +748,17 @@ app.put(
                 .from("hymns_files_json")
                 .getPublicUrl(filePath);
               finalHymnFileUrl = data.publicUrl;
+              // Delete old file if the extension changed (different storage path)
+              const oldPath = extractStoragePath(
+                existingHymn?.hymn_file_location,
+                "hymns_files_json",
+              );
+              if (oldPath && oldPath !== filePath) {
+                await deleteStorageFile(
+                  "hymns_files_json",
+                  existingHymn.hymn_file_location,
+                );
+              }
             } else {
               console.error("Hymn file upload error:", error.message);
             }
@@ -672,6 +783,17 @@ app.put(
                 .from("deacons_school_hymns_files")
                 .getPublicUrl(filePath);
               finalHazzatUrl = data.publicUrl;
+              // Delete old hazzat file if the extension changed
+              const oldPath = extractStoragePath(
+                existingHymn?.hazzat,
+                "deacons_school_hymns_files",
+              );
+              if (oldPath && oldPath !== filePath) {
+                await deleteStorageFile(
+                  "deacons_school_hymns_files",
+                  existingHymn.hazzat,
+                );
+              }
             } else {
               console.error("Hazzat file upload error:", error.message);
             }
@@ -736,10 +858,24 @@ app.get("/getHymnsByLevel/:level", async (req, res) => {
   res.send(data);
 });
 app.get("/getAllHymns", async (req, res) => {
-  let { data: data, error } = await supabase.supabase
+  const { page, limit, from, to } = parsePagination(req.query, 100);
+  const { data, error, count } = await supabase.supabase
     .from("deacons_school_hymns")
-    .select("*");
-  res.send(data);
+    .select("*", { count: "exact" })
+    .order("order_taught", { ascending: true })
+    .range(from, to);
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({
+    success: true,
+    data,
+    pagination: {
+      total: count,
+      page,
+      limit,
+      totalPages: Math.ceil(count / limit),
+    },
+  });
 });
 app.get("/getHymn/:id", async (req, res) => {
   const id = req.params.id;
@@ -1663,7 +1799,9 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
       });
     }
 
-    const { data, error } = await supabase.supabase
+    const { page, limit, from, to } = parsePagination(req.query, 100);
+
+    const { data, error, count } = await supabase.supabase
       .from("ds_student_enrollment")
       .select(
         `course_id,
@@ -1674,12 +1812,15 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           first_name,
           last_name,
           email,
-          cellphone
+          cellphone,
+          grade_level
         )`,
+        { count: "exact" },
       )
       .eq("course_id", courseId)
       .eq("is_active", true)
-      .order("profiles(first_name)", { ascending: true });
+      .order("profiles(first_name)", { ascending: true })
+      .range(from, to);
 
     if (error) {
       console.error("Error fetching students:", error);
@@ -1725,6 +1866,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           enrollment_id: enrollment.enrollment_id,
           is_active: enrollment.is_active,
           profile_pic: profileImageUrl,
+          grade_level: enrollment.profiles.grade_level || null,
         };
       }),
     );
@@ -1732,7 +1874,12 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
     res.json({
       success: true,
       data: studentsWithImages,
-      count: studentsWithImages.length,
+      pagination: {
+        total: count,
+        page,
+        limit,
+        totalPages: Math.ceil(count / limit),
+      },
     });
   } catch (error) {
     console.error("Get students by course error:", error);
@@ -1860,7 +2007,8 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           first_name,
           last_name,
           email,
-          cellphone
+          cellphone,
+          grade_level
         )`,
       )
       .eq("course_id", courseId)
@@ -1908,6 +2056,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           enrollment_id: enrollment.enrollment_id,
           is_active: enrollment.is_active,
           profile_pic: profileImageUrl,
+          grade_level: enrollment.profiles.grade_level || null,
         };
       }),
     );
@@ -2109,7 +2258,9 @@ app.get("/getAttendanceRecordByCourse/:course_id", async (req, res) => {
       });
     }
 
-    const { data, error } = await supabase.supabase
+    const { page, limit, from, to } = parsePagination(req.query);
+
+    const { data, error, count } = await supabase.supabase
       .from("ds_attendance")
       .select(
         `
@@ -2127,10 +2278,12 @@ app.get("/getAttendanceRecordByCourse/:course_id", async (req, res) => {
           topic
         )
       `,
+        { count: "exact" },
       )
       .eq("course_id", course_id)
-      .order("users(first_name)", { ascending: true });
-    console.log(data);
+      .order("users(first_name)", { ascending: true })
+      .range(from, to);
+
     if (error) {
       console.error("Error fetching attendance records:", error);
       return res.status(500).json({
@@ -2167,7 +2320,16 @@ app.get("/getAttendanceRecordByCourse/:course_id", async (req, res) => {
         : null,
     }));
 
-    res.send(attendanceRecords);
+    res.json({
+      success: true,
+      data: attendanceRecords,
+      pagination: {
+        total: count,
+        page,
+        limit,
+        totalPages: Math.ceil(count / limit),
+      },
+    });
   } catch (error) {
     console.error("Get attendance by session error:", error);
     res.status(500).json({
@@ -2180,441 +2342,457 @@ app.get("/getAttendanceRecordByCourse/:course_id", async (req, res) => {
  * Create new attendance session with records
  * POST /createAttendance
  */
-app.post("/createAttendance", async (req, res) => {
-  try {
-    const {
-      course_id,
-      session_date,
-      topic,
-      notes,
-      recorded_by,
-      attendance_records,
-    } = req.body;
+app.post(
+  "/createAttendance",
+  requireTeacherAssignedToCourse,
+  async (req, res) => {
+    try {
+      const {
+        course_id,
+        session_date,
+        topic,
+        notes,
+        recorded_by,
+        attendance_records,
+      } = req.body;
 
-    // Validation
-    if (!course_id || !session_date || !Array.isArray(attendance_records)) {
-      return res.status(400).json({
-        success: false,
-        error: "Course ID, session date, and attendance records are required",
-      });
-    }
-
-    if (attendance_records.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: "At least one attendance record is required",
-      });
-    }
-
-    // Validate date format
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(session_date)) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid date format. Use YYYY-MM-DD",
-      });
-    }
-
-    // First, create the class session
-    const sessionBody = {
-      course_id: course_id,
-      session_date: session_date,
-      topic: topic || null,
-      notes: notes || null,
-      recorded_by: recorded_by,
-      created_at: new Date().toISOString(),
-    };
-
-    console.log("Creating session with data:", sessionBody);
-
-    const { data: sessionData, error: sessionError } = await supabase.supabase
-      .from("ds_class_sessions")
-      .insert([sessionBody])
-      .select()
-      .single();
-
-    if (sessionError) {
-      console.error("Error creating session:", sessionError);
-      return res.status(500).json({
-        success: false,
-        error: "Failed to create class session",
-        details: sessionError.message,
-      });
-    }
-
-    console.log("Session created:", sessionData);
-
-    // Validate and prepare attendance records
-    const validatedRecords = [];
-    for (const record of attendance_records) {
-      if (!record.student_id || record.present === undefined) {
+      // Validation
+      if (!course_id || !session_date || !Array.isArray(attendance_records)) {
         return res.status(400).json({
           success: false,
-          error:
-            "Each attendance record must have student_id and present status",
+          error: "Course ID, session date, and attendance records are required",
         });
       }
-      console.log(course_id);
-      validatedRecords.push({
-        course_id: course_id,
-        student_id: record.student_id,
-        session_id: sessionData.session_id, // Use the created session ID
-        good_behavior: record.good_behavior, // Use 'present' field, not 'status'
-        present: record.present, // Use 'present' field, not 'status'
-        notes: record.notes || null,
-        recorded_by: recorded_by,
-        recorded_at: new Date().toISOString(),
-      });
-    }
 
-    console.log("Creating attendance records:", validatedRecords);
-
-    // Insert attendance records
-    const { data: attendanceData, error: attendanceError } =
-      await supabase.supabase
-        .from("ds_attendance")
-        .insert(validatedRecords)
-        .select();
-
-    if (attendanceError) {
-      console.error("Error creating attendance records:", attendanceError);
-
-      // Cleanup: delete the session if attendance insertion failed
-      await supabase.supabase
-        .from("ds_class_sessions")
-        .delete()
-        .eq("session_id", sessionData.session_id);
-
-      return res.status(500).json({
-        success: false,
-        error: "Failed to create attendance records",
-        details: attendanceError.message,
-      });
-    }
-
-    res.json({
-      success: true,
-      message: "Attendance created successfully",
-      data: {
-        session: sessionData,
-        attendance_records: attendanceData,
-        total_records: attendanceData.length,
-      },
-    });
-  } catch (error) {
-    console.error("Create attendance error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-    });
-  }
-});
-app.post("/createTeacherAttendance", async (req, res) => {
-  try {
-    const {
-      course_id,
-      session_date,
-      topic,
-      notes,
-      recorded_by,
-      attendance_records,
-    } = req.body;
-
-    // Validation
-    if (!course_id || !session_date || !Array.isArray(attendance_records)) {
-      return res.status(400).json({
-        success: false,
-        error: "Course ID, session date, and attendance records are required",
-      });
-    }
-
-    if (attendance_records.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: "At least one attendance record is required",
-      });
-    }
-
-    // Validate date format
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(session_date)) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid date format. Use YYYY-MM-DD",
-      });
-    }
-
-    // First, create the class session
-    const sessionBody = {
-      course_id: course_id,
-      session_date: session_date,
-      topic: topic || null,
-      notes: notes || null,
-      recorded_by: recorded_by,
-      created_at: new Date().toISOString(),
-    };
-
-    console.log("Creating session with data:", sessionBody);
-
-    const { data: sessionData, error: sessionError } = await supabase.supabase
-      .from("ds_class_sessions")
-      .insert([sessionBody])
-      .select()
-      .single();
-
-    if (sessionError) {
-      console.error("Error creating session:", sessionError);
-      return res.status(500).json({
-        success: false,
-        error: "Failed to create class session",
-        details: sessionError.message,
-      });
-    }
-
-    console.log("Session created:", sessionData);
-
-    // Validate and prepare attendance records
-    const validatedRecords = [];
-    for (const record of attendance_records) {
-      if (!record.student_id || record.present === undefined) {
+      if (attendance_records.length === 0) {
         return res.status(400).json({
           success: false,
-          error:
-            "Each attendance record must have student_id and present status",
+          error: "At least one attendance record is required",
         });
       }
-      console.log(course_id);
-      validatedRecords.push({
+
+      // Validate date format
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(session_date)) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid date format. Use YYYY-MM-DD",
+        });
+      }
+
+      // First, create the class session
+      const sessionBody = {
         course_id: course_id,
-        teacher_id: record.teacher_id,
-        session_id: sessionData.session_id, // Use the created session ID
-        good_behavior: record.good_behavior, // Use 'present' field, not 'status'
-        present: record.present, // Use 'present' field, not 'status'
-        notes: record.notes || null,
+        session_date: session_date,
+        topic: topic || null,
+        notes: notes || null,
         recorded_by: recorded_by,
-        recorded_at: new Date().toISOString(),
-      });
-    }
+        created_at: new Date().toISOString(),
+      };
 
-    console.log("Creating attendance records:", validatedRecords);
+      console.log("Creating session with data:", sessionBody);
 
-    // Insert attendance records
-    const { data: attendanceData, error: attendanceError } =
-      await supabase.supabase
-        .from("ds_teacher_attendance")
-        .insert(validatedRecords)
-        .select();
-
-    if (attendanceError) {
-      console.error("Error creating attendance records:", attendanceError);
-
-      // Cleanup: delete the session if attendance insertion failed
-      await supabase.supabase
+      const { data: sessionData, error: sessionError } = await supabase.supabase
         .from("ds_class_sessions")
-        .delete()
-        .eq("session_id", sessionData.session_id);
+        .insert([sessionBody])
+        .select()
+        .single();
 
-      return res.status(500).json({
+      if (sessionError) {
+        console.error("Error creating session:", sessionError);
+        return res.status(500).json({
+          success: false,
+          error: "Failed to create class session",
+          details: sessionError.message,
+        });
+      }
+
+      console.log("Session created:", sessionData);
+
+      // Validate and prepare attendance records
+      const validatedRecords = [];
+      for (const record of attendance_records) {
+        if (!record.student_id || record.present === undefined) {
+          return res.status(400).json({
+            success: false,
+            error:
+              "Each attendance record must have student_id and present status",
+          });
+        }
+        console.log(course_id);
+        validatedRecords.push({
+          course_id: course_id,
+          student_id: record.student_id,
+          session_id: sessionData.session_id, // Use the created session ID
+          good_behavior: record.good_behavior, // Use 'present' field, not 'status'
+          present: record.present, // Use 'present' field, not 'status'
+          notes: record.notes || null,
+          recorded_by: recorded_by,
+          recorded_at: new Date().toISOString(),
+        });
+      }
+
+      console.log("Creating attendance records:", validatedRecords);
+
+      // Insert attendance records
+      const { data: attendanceData, error: attendanceError } =
+        await supabase.supabase
+          .from("ds_attendance")
+          .insert(validatedRecords)
+          .select();
+
+      if (attendanceError) {
+        console.error("Error creating attendance records:", attendanceError);
+
+        // Cleanup: delete the session if attendance insertion failed
+        await supabase.supabase
+          .from("ds_class_sessions")
+          .delete()
+          .eq("session_id", sessionData.session_id);
+
+        return res.status(500).json({
+          success: false,
+          error: "Failed to create attendance records",
+          details: attendanceError.message,
+        });
+      }
+
+      res.json({
+        success: true,
+        message: "Attendance created successfully",
+        data: {
+          session: sessionData,
+          attendance_records: attendanceData,
+          total_records: attendanceData.length,
+        },
+      });
+    } catch (error) {
+      console.error("Create attendance error:", error);
+      res.status(500).json({
         success: false,
-        error: "Failed to create attendance records",
-        details: attendanceError.message,
+        error: "Internal server error",
       });
     }
+  },
+);
+app.post(
+  "/createTeacherAttendance",
+  requireTeacherAssignedToCourse,
+  async (req, res) => {
+    try {
+      const {
+        course_id,
+        session_date,
+        topic,
+        notes,
+        recorded_by,
+        attendance_records,
+      } = req.body;
 
-    res.json({
-      success: true,
-      message: "Attendance created successfully",
-      data: {
-        session: sessionData,
-        attendance_records: attendanceData,
-        total_records: attendanceData.length,
-      },
-    });
-  } catch (error) {
-    console.error("Create attendance error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-    });
-  }
-});
+      // Validation
+      if (!course_id || !session_date || !Array.isArray(attendance_records)) {
+        return res.status(400).json({
+          success: false,
+          error: "Course ID, session date, and attendance records are required",
+        });
+      }
+
+      if (attendance_records.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "At least one attendance record is required",
+        });
+      }
+
+      // Validate date format
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(session_date)) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid date format. Use YYYY-MM-DD",
+        });
+      }
+
+      // First, create the class session
+      const sessionBody = {
+        course_id: course_id,
+        session_date: session_date,
+        topic: topic || null,
+        notes: notes || null,
+        recorded_by: recorded_by,
+        created_at: new Date().toISOString(),
+      };
+
+      console.log("Creating session with data:", sessionBody);
+
+      const { data: sessionData, error: sessionError } = await supabase.supabase
+        .from("ds_class_sessions")
+        .insert([sessionBody])
+        .select()
+        .single();
+
+      if (sessionError) {
+        console.error("Error creating session:", sessionError);
+        return res.status(500).json({
+          success: false,
+          error: "Failed to create class session",
+          details: sessionError.message,
+        });
+      }
+
+      console.log("Session created:", sessionData);
+
+      // Validate and prepare attendance records
+      const validatedRecords = [];
+      for (const record of attendance_records) {
+        if (!record.student_id || record.present === undefined) {
+          return res.status(400).json({
+            success: false,
+            error:
+              "Each attendance record must have student_id and present status",
+          });
+        }
+        console.log(course_id);
+        validatedRecords.push({
+          course_id: course_id,
+          teacher_id: record.teacher_id,
+          session_id: sessionData.session_id, // Use the created session ID
+          good_behavior: record.good_behavior, // Use 'present' field, not 'status'
+          present: record.present, // Use 'present' field, not 'status'
+          notes: record.notes || null,
+          recorded_by: recorded_by,
+          recorded_at: new Date().toISOString(),
+        });
+      }
+
+      console.log("Creating attendance records:", validatedRecords);
+
+      // Insert attendance records
+      const { data: attendanceData, error: attendanceError } =
+        await supabase.supabase
+          .from("ds_teacher_attendance")
+          .insert(validatedRecords)
+          .select();
+
+      if (attendanceError) {
+        console.error("Error creating attendance records:", attendanceError);
+
+        // Cleanup: delete the session if attendance insertion failed
+        await supabase.supabase
+          .from("ds_class_sessions")
+          .delete()
+          .eq("session_id", sessionData.session_id);
+
+        return res.status(500).json({
+          success: false,
+          error: "Failed to create attendance records",
+          details: attendanceError.message,
+        });
+      }
+
+      res.json({
+        success: true,
+        message: "Attendance created successfully",
+        data: {
+          session: sessionData,
+          attendance_records: attendanceData,
+          total_records: attendanceData.length,
+        },
+      });
+    } catch (error) {
+      console.error("Create attendance error:", error);
+      res.status(500).json({
+        success: false,
+        error: "Internal server error",
+      });
+    }
+  },
+);
 
 /**
  * Update existing attendance session and records
  * PUT /updateAttendance/:sessionId
  */
-app.put("/updateAttendance/:sessionId", async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { topic, notes, recorded_by, attendance_records, course_id } =
-      req.body;
+app.put(
+  "/updateAttendance/:sessionId",
+  requireTeacherAssignedToCourse,
+  async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const { topic, notes, recorded_by, attendance_records, course_id } =
+        req.body;
 
-    if (!sessionId) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Session ID is required" });
-    }
+      if (!sessionId) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Session ID is required" });
+      }
 
-    if (!Array.isArray(attendance_records)) {
-      return res.status(400).json({
-        success: false,
-        error: "Attendance records array is required",
-      });
-    }
+      if (!Array.isArray(attendance_records)) {
+        return res.status(400).json({
+          success: false,
+          error: "Attendance records array is required",
+        });
+      }
 
-    // Update session info
-    const { error: sessionError } = await supabase.supabase
-      .from("ds_class_sessions")
-      .update({
-        topic: topic || null,
-        notes: notes || null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("session_id", sessionId);
+      // Update session info
+      const { error: sessionError } = await supabase.supabase
+        .from("ds_class_sessions")
+        .update({
+          topic: topic || null,
+          notes: notes || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("session_id", sessionId);
 
-    if (sessionError) {
-      console.error("Error updating session:", sessionError);
-      return res
-        .status(500)
-        .json({ success: false, error: "Failed to update session" });
-    }
+      if (sessionError) {
+        console.error("Error updating session:", sessionError);
+        return res
+          .status(500)
+          .json({ success: false, error: "Failed to update session" });
+      }
 
-    // Validate and prepare attendance records
-    const validatedRecords = attendance_records.map((record) => ({
-      course_id,
-      student_id: record.student_id,
-      session_id: sessionId,
-      present: record.present,
-      good_behavior: record.good_behavior,
-      notes: record.notes || null,
-      recorded_by,
-      recorded_at: new Date().toISOString(),
-    }));
-    console.log(validatedRecords);
-    // Insert/update attendance
-    // First, delete existing attendance for this session
-    await supabase.supabase
-      .from("ds_attendance")
-      .delete()
-      .eq("session_id", sessionId);
-
-    // Then insert the new records
-    const { data: attendanceData, error: attendanceError } =
+      // Validate and prepare attendance records
+      const validatedRecords = attendance_records.map((record) => ({
+        course_id,
+        student_id: record.student_id,
+        session_id: sessionId,
+        present: record.present,
+        good_behavior: record.good_behavior,
+        notes: record.notes || null,
+        recorded_by,
+        recorded_at: new Date().toISOString(),
+      }));
+      console.log(validatedRecords);
+      // Insert/update attendance
+      // First, delete existing attendance for this session
       await supabase.supabase
         .from("ds_attendance")
-        .insert(validatedRecords)
-        .select();
+        .delete()
+        .eq("session_id", sessionId);
 
-    console.log("Attendance upsert result:", {
-      attendanceData,
-      attendanceError,
-    });
+      // Then insert the new records
+      const { data: attendanceData, error: attendanceError } =
+        await supabase.supabase
+          .from("ds_attendance")
+          .insert(validatedRecords)
+          .select();
 
-    if (attendanceError) {
-      return res.status(500).json({
-        success: false,
-        error: "Failed to update attendance records",
+      console.log("Attendance upsert result:", {
+        attendanceData,
+        attendanceError,
       });
-    }
 
-    res.json({
-      success: true,
-      message: "Attendance updated successfully",
-      data: {
-        attendance_records: attendanceData,
-        total_records: attendanceData?.length || 0,
-      },
-    });
-  } catch (error) {
-    console.error("Update attendance error:", error);
-    res.status(500).json({ success: false, error: "Internal server error" });
-  }
-});
-app.put("/updateTeacherAttendance/:sessionId", async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { topic, notes, recorded_by, attendance_records, course_id } =
-      req.body;
+      if (attendanceError) {
+        return res.status(500).json({
+          success: false,
+          error: "Failed to update attendance records",
+        });
+      }
 
-    if (!sessionId) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Session ID is required" });
-    }
-
-    if (!Array.isArray(attendance_records)) {
-      return res.status(400).json({
-        success: false,
-        error: "Attendance records array is required",
+      res.json({
+        success: true,
+        message: "Attendance updated successfully",
+        data: {
+          attendance_records: attendanceData,
+          total_records: attendanceData?.length || 0,
+        },
       });
+    } catch (error) {
+      console.error("Update attendance error:", error);
+      res.status(500).json({ success: false, error: "Internal server error" });
     }
+  },
+);
+app.put(
+  "/updateTeacherAttendance/:sessionId",
+  requireTeacherAssignedToCourse,
+  async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const { topic, notes, recorded_by, attendance_records, course_id } =
+        req.body;
 
-    // Update session info
-    const { error: sessionError } = await supabase.supabase
-      .from("ds_class_sessions")
-      .update({
-        topic: topic || null,
-        notes: notes || null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("session_id", sessionId);
+      if (!sessionId) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Session ID is required" });
+      }
 
-    if (sessionError) {
-      console.error("Error updating session:", sessionError);
-      return res
-        .status(500)
-        .json({ success: false, error: "Failed to update session" });
-    }
+      if (!Array.isArray(attendance_records)) {
+        return res.status(400).json({
+          success: false,
+          error: "Attendance records array is required",
+        });
+      }
 
-    // Validate and prepare attendance records
-    const validatedRecords = attendance_records.map((record) => ({
-      course_id,
-      teacher_id: record.teacher_id,
-      session_id: sessionId,
-      present: record.present,
-      good_behavior: record.good_behavior,
-      notes: record.notes || null,
-      recorded_by,
-      recorded_at: new Date().toISOString(),
-    }));
-    console.log(validatedRecords);
-    // Insert/update attendance
-    // First, delete existing attendance for this session
-    await supabase.supabase
-      .from("ds_teacher_attendance")
-      .delete()
-      .eq("session_id", sessionId);
+      // Update session info
+      const { error: sessionError } = await supabase.supabase
+        .from("ds_class_sessions")
+        .update({
+          topic: topic || null,
+          notes: notes || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("session_id", sessionId);
 
-    // Then insert the new records
-    const { data: attendanceData, error: attendanceError } =
+      if (sessionError) {
+        console.error("Error updating session:", sessionError);
+        return res
+          .status(500)
+          .json({ success: false, error: "Failed to update session" });
+      }
+
+      // Validate and prepare attendance records
+      const validatedRecords = attendance_records.map((record) => ({
+        course_id,
+        teacher_id: record.teacher_id,
+        session_id: sessionId,
+        present: record.present,
+        good_behavior: record.good_behavior,
+        notes: record.notes || null,
+        recorded_by,
+        recorded_at: new Date().toISOString(),
+      }));
+      console.log(validatedRecords);
+      // Insert/update attendance
+      // First, delete existing attendance for this session
       await supabase.supabase
         .from("ds_teacher_attendance")
-        .insert(validatedRecords)
-        .select();
+        .delete()
+        .eq("session_id", sessionId);
 
-    console.log("Attendance upsert result:", {
-      attendanceData,
-      attendanceError,
-    });
+      // Then insert the new records
+      const { data: attendanceData, error: attendanceError } =
+        await supabase.supabase
+          .from("ds_teacher_attendance")
+          .insert(validatedRecords)
+          .select();
 
-    if (attendanceError) {
-      return res.status(500).json({
-        success: false,
-        error: "Failed to update attendance records",
+      console.log("Attendance upsert result:", {
+        attendanceData,
+        attendanceError,
       });
-    }
 
-    res.json({
-      success: true,
-      message: "Attendance updated successfully",
-      data: {
-        attendance_records: attendanceData,
-        total_records: attendanceData?.length || 0,
-      },
-    });
-  } catch (error) {
-    console.error("Update attendance error:", error);
-    res.status(500).json({ success: false, error: "Internal server error" });
-  }
-});
+      if (attendanceError) {
+        return res.status(500).json({
+          success: false,
+          error: "Failed to update attendance records",
+        });
+      }
+
+      res.json({
+        success: true,
+        message: "Attendance updated successfully",
+        data: {
+          attendance_records: attendanceData,
+          total_records: attendanceData?.length || 0,
+        },
+      });
+    } catch (error) {
+      console.error("Update attendance error:", error);
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  },
+);
 
 /**
  * Get current user information
@@ -2798,76 +2976,96 @@ app.post("/enrollStudent", async (req, res) => {
   try {
     const { student_id, course_id } = req.body;
 
-    // Validate required fields
     if (!student_id || !course_id) {
       return res.status(400).json({
+        success: false,
         error: "student_id and course_id are required",
       });
     }
 
-    // Check if student is already enrolled in this course
+    // Resolve the current academic year
+    const { data: currentYear, error: yearError } = await supabase.supabase
+      .from("ds_academic_years")
+      .select("year_label")
+      .eq("is_current", true)
+      .single();
+
+    if (yearError || !currentYear) {
+      return res
+        .status(500)
+        .json({ success: false, error: "No active academic year found" });
+    }
+    const academic_year = currentYear.year_label;
+
+    // Check if student is already enrolled in this course for this year
     const { data: existing, error: checkError } = await supabase.supabase
       .from("ds_student_enrollment")
-      .select("*")
+      .select("enrollment_id, is_active")
       .eq("student_id", student_id)
-      .eq("course_id", course_id);
+      .eq("course_id", course_id)
+      .eq("academic_year", academic_year)
+      .maybeSingle();
 
     if (checkError) {
-      console.error("Error checking existing enrollment:", checkError);
-      return res.status(500).json({ error: checkError.message });
+      return res
+        .status(500)
+        .json({ success: false, error: checkError.message });
     }
 
-    if (existing && existing.length > 0) {
-      // Student already enrolled, update to active
+    if (existing) {
+      if (existing.is_active) {
+        return res.status(409).json({
+          success: false,
+          error: "Student is already actively enrolled in this course",
+        });
+      }
+      // Re-activate a previously inactive enrollment
       const { data, error } = await supabase.supabase
         .from("ds_student_enrollment")
         .update({
-          course_id: course_id,
           is_active: true,
           enrolled_date: new Date().toISOString().split("T")[0],
         })
-        .eq("student_id", student_id)
-        .eq("course_id", course_id)
-        .select();
+        .eq("enrollment_id", existing.enrollment_id)
+        .select()
+        .single();
 
-      if (error) {
-        console.error("Supabase update error:", error);
-        return res.status(500).json({ error: error.message });
-      }
-
+      if (error)
+        return res.status(500).json({ success: false, error: error.message });
       return res.json({
-        message: "Student enrollment updated successfully",
-        data: data,
-      });
-    } else {
-      // New enrollment
-      const body = {
-        student_id: student_id,
-        course_id: course_id,
-        enrolled_date: new Date().toISOString().split("T")[0],
-        is_active: true,
-      };
-
-      console.log("Inserting student enrollment:", body);
-
-      const { data, error } = await supabase.supabase
-        .from("ds_student_enrollment")
-        .insert([body])
-        .select();
-
-      if (error) {
-        console.error("Supabase insert error:", error);
-        return res.status(500).json({ error: error.message });
-      }
-
-      return res.json({
-        message: "Student enrolled successfully",
-        data: data,
+        success: true,
+        message: "Student re-enrolled successfully",
+        data,
+        reactivated: true,
       });
     }
+
+    // New enrollment
+    const { data, error } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .insert([
+        {
+          student_id,
+          course_id,
+          academic_year,
+          enrolled_date: new Date().toISOString().split("T")[0],
+          is_active: true,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    return res.json({
+      success: true,
+      message: "Student enrolled successfully",
+      data,
+      reactivated: false,
+    });
   } catch (err) {
     console.error("Unexpected error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 app.post("/unenrollStudent", async (req, res) => {
@@ -2882,9 +3080,9 @@ app.post("/unenrollStudent", async (req, res) => {
     }
 
     // Check enrollment
-    const { data: existing, error: checkError } = await supabase
+    const { data: existing, error: checkError } = await supabase.supabase
       .from("ds_student_enrollment")
-      .select("id")
+      .select("enrollment_id")
       .eq("student_id", student_id)
       .eq("course_id", course_id)
       .maybeSingle(); // returns null if none found
@@ -2901,12 +3099,9 @@ app.post("/unenrollStudent", async (req, res) => {
     }
 
     // Mark enrollment inactive
-    const { data, error } = await supabase
+    const { data, error } = await supabase.supabase
       .from("ds_student_enrollment")
-      .update({
-        is_active: false,
-        unenrolled_date: new Date().toISOString().split("T")[0],
-      })
+      .update({ is_active: false })
       .eq("student_id", student_id)
       .eq("course_id", course_id)
       .select();
@@ -2926,18 +3121,159 @@ app.post("/unenrollStudent", async (req, res) => {
   }
 });
 
-app.get("/getEnrolledDSStudents/:course_id", async (req, res) => {
-  // Check if student is already enrolled in this course
-  const { course_id } = req.params;
-  const { data: data, error: error } = await supabase.supabase
-    .from("ds_student_enrollment")
-    .select("*")
-    .eq("course_id", course_id);
-  if (error) {
-    res.status(500).send(error.message);
-  } else {
-    res.send(data);
+// ── Self-enrollment: student enrolls themselves for the current academic year ──
+app.post("/selfEnroll", authenticateToken, async (req, res) => {
+  try {
+    const { student_id, course_id } = req.body;
+
+    if (!student_id || !course_id) {
+      return res.status(400).json({
+        success: false,
+        error: "student_id and course_id are required",
+      });
+    }
+
+    // Security: verify student_id belongs to the authenticated user or one of their family members
+    const { data: authProfiles, error: profileError } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id")
+      .eq("id", req.user.id);
+
+    if (profileError || !authProfiles?.length) {
+      return res
+        .status(403)
+        .json({ success: false, error: "User profile not found" });
+    }
+
+    const authPortalIds = authProfiles.map((p) => p.portal_id);
+
+    const { data: familyMembers, error: familyError } =
+      await supabase.supabase.rpc("get_family_children", {
+        portal_id_in: authPortalIds,
+      });
+
+    if (familyError) {
+      return res
+        .status(500)
+        .json({ success: false, error: "Could not verify family membership" });
+    }
+
+    const allowedPortalIds = new Set(
+      (familyMembers || []).map((m) => String(m.portal_id)),
+    );
+    if (!allowedPortalIds.has(String(student_id))) {
+      return res.status(403).json({
+        success: false,
+        error: "You can only enroll yourself or a family member",
+      });
+    }
+
+    // Get current academic year
+    const { data: currentYear, error: yearError } = await supabase.supabase
+      .from("ds_academic_years")
+      .select("year_label")
+      .eq("is_current", true)
+      .single();
+
+    if (yearError || !currentYear) {
+      return res
+        .status(500)
+        .json({ success: false, error: "No active academic year found" });
+    }
+    const academic_year = currentYear.year_label;
+
+    // Check if already actively enrolled in ANY course this year
+    const { data: existingActive } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id, course_id")
+      .eq("student_id", student_id)
+      .eq("academic_year", academic_year)
+      .eq("is_active", true)
+      .maybeSingle();
+
+    if (existingActive) {
+      return res.status(409).json({
+        success: false,
+        error: "You are already enrolled for this academic year",
+        existingEnrollment: existingActive,
+      });
+    }
+
+    // Check for a previously inactive enrollment for this specific course + year
+    const { data: existingInactive } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id")
+      .eq("student_id", student_id)
+      .eq("course_id", course_id)
+      .eq("academic_year", academic_year)
+      .eq("is_active", false)
+      .maybeSingle();
+
+    if (existingInactive) {
+      const { data, error } = await supabase.supabase
+        .from("ds_student_enrollment")
+        .update({
+          is_active: true,
+          enrolled_date: new Date().toISOString().split("T")[0],
+        })
+        .eq("enrollment_id", existingInactive.enrollment_id)
+        .select()
+        .single();
+
+      if (error)
+        return res.status(500).json({ success: false, error: error.message });
+      return res.json({
+        success: true,
+        message: "Enrolled successfully",
+        data,
+      });
+    }
+
+    // New enrollment
+    const { data, error } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .insert([
+        {
+          student_id,
+          course_id,
+          academic_year,
+          enrolled_date: new Date().toISOString().split("T")[0],
+          is_active: true,
+          role: "deacon_school_student",
+        },
+      ])
+      .select()
+      .single();
+
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    return res.json({ success: true, message: "Enrolled successfully", data });
+  } catch (err) {
+    console.error("selfEnroll error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
   }
+});
+
+app.get("/getEnrolledDSStudents/:course_id", async (req, res) => {
+  const { course_id } = req.params;
+  const { page, limit, from, to } = parsePagination(req.query, 100);
+  const { data, error, count } = await supabase.supabase
+    .from("ds_student_enrollment")
+    .select("*", { count: "exact" })
+    .eq("course_id", course_id)
+    .range(from, to);
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({
+    success: true,
+    data,
+    pagination: {
+      total: count,
+      page,
+      limit,
+      totalPages: Math.ceil(count / limit),
+    },
+  });
 });
 
 app.put("/updateAllLevels", async (req, res) => {
@@ -2981,6 +3317,588 @@ app.put("/updateAllLevels", async (req, res) => {
     res.status(500).send("Server error");
   }
 });
+
+// ─── Academic Year Management ──────────────────────────────────────────────────
+
+app.get("/academicYears", async (req, res) => {
+  const { data, error } = await supabase.supabase
+    .from("ds_academic_years")
+    .select("*")
+    .order("start_date", { ascending: false });
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+app.get("/academicYears/current", async (req, res) => {
+  const { data, error } = await supabase.supabase
+    .from("ds_academic_years")
+    .select("*")
+    .eq("is_current", true)
+    .single();
+  if (error)
+    return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+app.post("/academicYears", async (req, res) => {
+  try {
+    const { year_label, start_date, end_date } = req.body;
+    if (!year_label || !start_date || !end_date) {
+      return res.status(400).json({
+        success: false,
+        error: "year_label, start_date, and end_date are required",
+      });
+    }
+    if (!/^\d{4}-\d{4}$/.test(year_label)) {
+      return res.status(400).json({
+        success: false,
+        error: "year_label must be in YYYY-YYYY format",
+      });
+    }
+    const { data, error } = await supabase.supabase
+      .from("ds_academic_years")
+      .insert([{ year_label, start_date, end_date, is_current: false }])
+      .select()
+      .single();
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+app.patch("/academicYears/:yearId/setCurrent", async (req, res) => {
+  try {
+    const { yearId } = req.params;
+
+    // Clear current flag from all years, then set the target
+    const { error: clearErr } = await supabase.supabase
+      .from("ds_academic_years")
+      .update({ is_current: false })
+      .neq("year_id", yearId);
+    if (clearErr)
+      return res.status(500).json({ success: false, error: clearErr.message });
+
+    const { data, error } = await supabase.supabase
+      .from("ds_academic_years")
+      .update({ is_current: true })
+      .eq("year_id", yearId)
+      .select()
+      .single();
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+app.delete("/academicYears/:yearId", async (req, res) => {
+  try {
+    const { yearId } = req.params;
+
+    // Prevent deleting the current year
+    const { data: year } = await supabase.supabase
+      .from("ds_academic_years")
+      .select("is_current")
+      .eq("year_id", yearId)
+      .single();
+
+    if (year?.is_current) {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot delete the current academic year",
+      });
+    }
+
+    const { error } = await supabase.supabase
+      .from("ds_academic_years")
+      .delete()
+      .eq("year_id", yearId);
+
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// ─── Year-End Close-Out & Re-enrollment ───────────────────────────────────────
+
+// POST /yearEnd/finalizeAllGrades/:academicYear
+// Collects all existing final grades for active enrollments in the given year
+// from ds_student_final_grades. No grade recalculation is performed.
+app.post("/yearEnd/finalizeAllGrades/:academicYear", async (req, res) => {
+  try {
+    const { academicYear } = req.params;
+
+    // Get all active enrollments for this year
+    const { data: enrollments, error: enrollErr } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("student_id, course_id")
+      .eq("academic_year", academicYear)
+      .eq("is_active", true);
+
+    if (enrollErr)
+      return res.status(500).json({ success: false, error: enrollErr.message });
+
+    if (!enrollments || enrollments.length === 0) {
+      return res.json({
+        success: true,
+        message: "No active enrollments found",
+        total_enrollments: 0,
+        grades_found: 0,
+        missing_grades: 0,
+      });
+    }
+
+    // Fetch all existing final grades matching enrolled student/course pairs
+    const enrolledStudentIds = [
+      ...new Set(enrollments.map((e) => e.student_id)),
+    ];
+    const enrolledCourseIds = [...new Set(enrollments.map((e) => e.course_id))];
+
+    const { data: finalGrades, error: gradesErr } = await supabase.supabase
+      .from("ds_student_final_grades")
+      .select("student_id, course_id")
+      .in("student_id", enrolledStudentIds)
+      .in("course_id", enrolledCourseIds);
+
+    if (gradesErr)
+      return res.status(500).json({ success: false, error: gradesErr.message });
+
+    const gradeMap = new Set(
+      (finalGrades || []).map((g) => `${g.student_id}__${g.course_id}`),
+    );
+
+    const gradesFound = enrollments.filter((e) =>
+      gradeMap.has(`${e.student_id}__${e.course_id}`),
+    ).length;
+
+    res.json({
+      success: true,
+      message: `Found grades for ${gradesFound} of ${enrollments.length} active enrollments`,
+      total_enrollments: enrollments.length,
+      grades_found: gradesFound,
+      missing_grades: enrollments.length - gradesFound,
+    });
+  } catch (err) {
+    console.error("finalizeAllGrades error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// GET /yearEnd/summary/:academicYear
+// Returns every student enrolled in the given year with their final grade info.
+// Uses the same ds_student_final_grades query that getStudentGrades already uses —
+// bulk fetch by student_id list, same fields, same table, no academic_year filter needed.
+app.get("/yearEnd/summary/:academicYear", async (req, res) => {
+  try {
+    const { academicYear } = req.params;
+
+    // Enrollments with course info
+    const { data: enrollments, error: enrollErr } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select(
+        `
+          enrollment_id,
+          student_id,
+          course_id,
+          is_active,
+          ds_courses:course_id (course_id, class_name, level)
+        `,
+      )
+      .eq("academic_year", academicYear)
+      .eq("is_active", true);
+
+    if (enrollErr) {
+      console.error("yearEnd summary enrollment error:", enrollErr);
+      return res.status(500).json({ success: false, error: enrollErr.message });
+    }
+
+    if (!enrollments || enrollments.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // Bulk fetch final grades from ds_student_final_grades by student_id list —
+    // same table and same fields as GET /getStudentGrades/:studentId/:courseId.
+    const studentIds = [...new Set(enrollments.map((e) => e.student_id))];
+
+    const { data: finalGrades, error: gradesErr } = await supabase.supabase
+      .from("ds_student_final_grades")
+      .select(
+        "student_id, course_id, weighted_percentage, is_passing_year, calculated_at",
+      )
+      .in("student_id", studentIds);
+
+    if (gradesErr) {
+      console.error("yearEnd summary grades error:", gradesErr);
+    }
+
+    // Build lookup map by "student_id__course_id" — same as the working grade panel
+    const gradeMap = {};
+    (finalGrades || []).forEach((g) => {
+      gradeMap[`${g.student_id}__${g.course_id}`] = g;
+    });
+
+    // Student profiles
+    const { data: profiles } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id, first_name, last_name, email")
+      .in("portal_id", studentIds);
+
+    const profileMap = {};
+    (profiles || []).forEach((p) => {
+      profileMap[p.portal_id] = p;
+    });
+
+    const summary = enrollments.map((e) => {
+      const grade = gradeMap[`${e.student_id}__${e.course_id}`] || null;
+      const profile = profileMap[e.student_id] || {};
+      return {
+        enrollment_id: e.enrollment_id,
+        student_id: e.student_id,
+        first_name: profile.first_name || "",
+        last_name: profile.last_name || "",
+        email: profile.email || "",
+        course_id: e.course_id,
+        class_name: e.ds_courses?.class_name || "",
+        level: e.ds_courses?.level || "",
+        weighted_percentage: grade?.weighted_percentage ?? null,
+        is_passing_year: grade?.is_passing_year ?? null,
+        grade_calculated: !!grade,
+        calculated_at: grade?.calculated_at ?? null,
+      };
+    });
+
+    res.json({ success: true, data: summary });
+  } catch (err) {
+    console.error("yearEnd summary error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// PATCH /yearEnd/closeYear/:yearId
+// Marks the academic year as closed — no further grade/attendance writes allowed.
+app.patch("/yearEnd/closeYear/:yearId", async (req, res) => {
+  try {
+    const { yearId } = req.params;
+
+    const { data, error } = await supabase.supabase
+      .from("ds_academic_years")
+      .update({ is_closed: true, is_current: false })
+      .eq("year_id", yearId)
+      .select()
+      .single();
+
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// POST /bulkUpdateGradeLevels
+// Updates grade_level for multiple students in the profiles table
+app.post("/bulkUpdateGradeLevels", async (req, res) => {
+  try {
+    const { updates } = req.body;
+
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid request: updates array is required",
+      });
+    }
+
+    // Validate each update has required fields
+    for (const update of updates) {
+      if (!update.portal_id || !update.grade_level) {
+        return res.status(400).json({
+          success: false,
+          error: "Each update must have portal_id and grade_level",
+        });
+      }
+    }
+
+    const results = [];
+    const errors = [];
+
+    // Update each student's grade level
+    for (const update of updates) {
+      const { data, error } = await supabase.supabase
+        .from("profiles")
+        .update({ grade_level: update.grade_level })
+        .eq("portal_id", update.portal_id)
+        .select()
+        .single();
+
+      if (error) {
+        errors.push({
+          portal_id: update.portal_id,
+          error: error.message,
+        });
+      } else {
+        results.push(data);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(207).json({
+        success: true,
+        data: results,
+        partial: true,
+        errors,
+        message: `Updated ${results.length} of ${updates.length} students`,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: results,
+      message: `Successfully updated ${results.length} student(s)`,
+    });
+  } catch (err) {
+    console.error("bulkUpdateGradeLevels error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// GET /reenrollment/candidates/:academicYear
+// Returns all students enrolled in the given year with their final grade info,
+// ready for the admin to decide their next course enrollment.
+app.get("/reenrollment/candidates/:academicYear", async (req, res) => {
+  try {
+    const { academicYear } = req.params;
+
+    const { data: enrollments, error: enrollErr } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select(
+        `
+        enrollment_id,
+        student_id,
+        course_id,
+        ds_courses:course_id (course_id, class_name, level)
+      `,
+      )
+      .eq("academic_year", academicYear)
+      .eq("is_active", true);
+
+    if (enrollErr)
+      return res.status(500).json({ success: false, error: enrollErr.message });
+
+    const { data: finalGrades } = await supabase.supabase
+      .from("ds_student_final_grades")
+      .select("student_id, course_id, weighted_percentage, is_passing_year")
+      .eq("academic_year", academicYear);
+
+    const gradeMap = {};
+    (finalGrades || []).forEach((g) => {
+      gradeMap[`${g.student_id}__${g.course_id}`] = g;
+    });
+
+    const studentIds = [
+      ...new Set((enrollments || []).map((e) => e.student_id)),
+    ];
+    const { data: profiles } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id, first_name, last_name, email")
+      .in("portal_id", studentIds);
+
+    const profileMap = {};
+    (profiles || []).forEach((p) => {
+      profileMap[p.portal_id] = p;
+    });
+
+    const candidates = (enrollments || []).map((e) => {
+      const grade = gradeMap[`${e.student_id}__${e.course_id}`] || null;
+      const profile = profileMap[e.student_id] || {};
+      return {
+        student_id: e.student_id,
+        first_name: profile.first_name || "",
+        last_name: profile.last_name || "",
+        email: profile.email || "",
+        current_course_id: e.course_id,
+        current_class_name: e.ds_courses?.class_name || "",
+        current_level: e.ds_courses?.level || "",
+        weighted_percentage: grade?.weighted_percentage ?? null,
+        is_passing_year: grade?.is_passing_year ?? null,
+        grade_calculated: !!grade,
+      };
+    });
+
+    res.json({ success: true, data: candidates });
+  } catch (err) {
+    console.error("reenrollment candidates error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// POST /reenrollment/bulk
+// Enrolls a list of students into specified courses for the current academic year.
+// Body: { enrollments: [{ student_id, course_id }], academic_year }
+app.post("/reenrollment/bulk", async (req, res) => {
+  try {
+    const { enrollments, academic_year } = req.body;
+
+    if (
+      !enrollments ||
+      !Array.isArray(enrollments) ||
+      enrollments.length === 0
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, error: "enrollments array is required" });
+    }
+    if (!academic_year) {
+      return res
+        .status(400)
+        .json({ success: false, error: "academic_year is required" });
+    }
+
+    const results = [];
+    const errors = [];
+
+    for (const item of enrollments) {
+      const { student_id, course_id } = item;
+      if (!student_id || !course_id) {
+        errors.push({
+          student_id,
+          course_id,
+          error: "student_id and course_id are required",
+        });
+        continue;
+      }
+
+      // Check if already enrolled for this year
+      const { data: existing } = await supabase.supabase
+        .from("ds_student_enrollment")
+        .select("enrollment_id, is_active")
+        .eq("student_id", student_id)
+        .eq("course_id", course_id)
+        .eq("academic_year", academic_year)
+        .maybeSingle();
+
+      if (existing) {
+        if (!existing.is_active) {
+          // Reactivate
+          const { error } = await supabase.supabase
+            .from("ds_student_enrollment")
+            .update({ is_active: true })
+            .eq("enrollment_id", existing.enrollment_id);
+          if (error) {
+            errors.push({ student_id, course_id, error: error.message });
+            continue;
+          }
+          results.push({ student_id, course_id, action: "reactivated" });
+        } else {
+          results.push({ student_id, course_id, action: "already_enrolled" });
+        }
+        continue;
+      }
+
+      // New enrollment
+      const { error } = await supabase.supabase
+        .from("ds_student_enrollment")
+        .insert([
+          {
+            student_id,
+            course_id,
+            academic_year,
+            enrolled_date: new Date().toISOString().split("T")[0],
+            is_active: true,
+            role: "deacon_school_student",
+          },
+        ]);
+
+      if (error) {
+        errors.push({ student_id, course_id, error: error.message });
+      } else {
+        results.push({ student_id, course_id, action: "enrolled" });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Enrolled ${results.filter((r) => r.action === "enrolled").length}, reactivated ${results.filter((r) => r.action === "reactivated").length}, skipped ${results.filter((r) => r.action === "already_enrolled").length}, errors ${errors.length}`,
+      results,
+      errors,
+    });
+  } catch (err) {
+    console.error("reenrollment bulk error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// POST /newYear/setupCourses
+// Creates a ds_courses row for each provided level in the new academic year.
+// Body: { academic_year, courses: [{ class_name, level }] }
+app.post("/newYear/setupCourses", async (req, res) => {
+  try {
+    const { academic_year, courses } = req.body;
+
+    if (
+      !academic_year ||
+      !courses ||
+      !Array.isArray(courses) ||
+      courses.length === 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "academic_year and courses array are required",
+      });
+    }
+
+    // Check for existing courses for this year to avoid duplicates
+    const { data: existing } = await supabase.supabase
+      .from("ds_courses")
+      .select("level")
+      .eq("academic_year", academic_year);
+
+    const existingLevels = new Set((existing || []).map((c) => c.level));
+
+    const toInsert = courses
+      .filter((c) => !existingLevels.has(c.level))
+      .map((c) => ({
+        class_name: c.class_name,
+        level: c.level,
+        is_active: true,
+        academic_year,
+      }));
+
+    if (toInsert.length === 0) {
+      return res.json({
+        success: true,
+        message: "All courses already exist for this year",
+        created: [],
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_courses")
+      .insert(toInsert)
+      .select();
+
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+
+    res.json({
+      success: true,
+      message: `Created ${data.length} courses for ${academic_year}`,
+      created: data,
+      skipped: courses.length - toInsert.length,
+    });
+  } catch (err) {
+    console.error("setupCourses error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// ─── End Year-End Close-Out & Re-enrollment ────────────────────────────────────
 
 app.get("/getCalendarByCourse/:course_id", async (req, res) => {
   const course_id = req.params.course_id;
@@ -3107,8 +4025,9 @@ app.get("/getAssessmentItems/:categoryId/:course_id", async (req, res) => {
 app.get("/getAssessmentItemsByCourse/:course_id", async (req, res) => {
   try {
     const { course_id } = req.params;
+    const { page, limit, from, to } = parsePagination(req.query);
 
-    const { data, error } = await supabase.supabase
+    const { data, error, count } = await supabase.supabase
       .from("ds_assessment_items")
       .select(
         `
@@ -3118,17 +4037,28 @@ app.get("/getAssessmentItemsByCourse/:course_id", async (req, res) => {
           weight_percentage
         )
       `,
+        { count: "exact" },
       )
       .eq("course_id", course_id)
       .eq("is_active", true)
-      .order("item_name");
+      .order("item_name")
+      .range(from, to);
 
     if (error) {
       console.error("Error fetching assessment items:", error);
       return res.status(500).json({ success: false, error: error.message });
     }
 
-    res.json({ success: true, data });
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total: count,
+        page,
+        limit,
+        totalPages: Math.ceil(count / limit),
+      },
+    });
   } catch (err) {
     console.error("Unexpected error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });

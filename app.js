@@ -1,7 +1,6 @@
 const express = require("express");
 const app = express();
-require("dotenv").config();
-const port = process.env.PORT || "3000";
+const { port, nodeEnv, isDevelopment } = require("./config/config");
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
 // Import route modules
@@ -24,6 +23,7 @@ const altarResponses = require("./routes/altarResponses");
 const stripeWebhook = require("./routes/stripeWebhook");
 
 const bodyParser = require("body-parser");
+
 
 // ==================== MIDDLEWARE SETUP ====================
 
@@ -50,8 +50,6 @@ app.use((req, res, next) => {
   const origin = req.headers.origin;
 
   // In development, allow any localhost port
-  const isDevelopment =
-    process.env.NODE_ENV === "development" || !process.env.NODE_ENV;
   const isLocalhost =
     origin &&
     (origin.startsWith("http://localhost:") ||
@@ -94,7 +92,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   let allowedOrigins = [];
 
-  if (process.env.NODE_ENV === "development") {
+  if (isDevelopment) {
     allowedOrigins = [
       "http://localhost:4200",
       "http://localhost:3000",
@@ -134,6 +132,9 @@ app.use((req, res, next) => {
 });
 
 // Body parser configuration with increased limits
+// Stripe webhook must be mounted before JSON parsing to preserve raw body
+app.use("/stripe", stripeWebhook);
+
 app.use(
   bodyParser.json({
     limit: "10mb",
@@ -179,14 +180,11 @@ app.get("/health", (req, res) => {
     message: "Server is healthy",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    environment: process.env.NODE_ENV || "development",
+    environment: nodeEnv,
   });
 });
 
 // ==================== ROUTE REGISTRATION ====================
-
-// Stripe webhook (must be before body-parser for raw signature verification)
-app.use("/stripe", stripeWebhook);
 
 // Mount all route modules
 app.use("/announcments", announcements);
@@ -256,9 +254,6 @@ app.use((error, req, res, next) => {
     timestamp: new Date().toISOString(),
   });
 
-  // Don't leak error details in production
-  const isDevelopment = process.env.NODE_ENV === "development";
-
   res.status(error.status || 500).json({
     success: false,
     message: error.message || "Internal server error",
@@ -301,7 +296,7 @@ const server = app.listen(port, () => {
   console.log(`
 🚀 St. George Coptic Orthodox Church API Server Started
 📍 Port: ${port}
-🌍 Environment: ${process.env.NODE_ENV || "development"}
+🌍 Environment: ${nodeEnv}
 ⏰ Started at: ${new Date().toISOString()}
 🔗 Health check: http://localhost:${port}/health
 📚 API docs: http://localhost:${port}/

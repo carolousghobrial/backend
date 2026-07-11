@@ -17,6 +17,10 @@ const app = express();
 const supabase = require("../config/config");
 const moment = require("moment-timezone");
 const axios = require("axios");
+const {
+  authenticateToken,
+  requireServiceAdmin,
+} = require("../middleware/auth");
 
 app.use(bp.json());
 app.use(bp.urlencoded({ extended: true }));
@@ -39,117 +43,136 @@ const err = (res, error, status = 500) => {
  * Body: { portal_id | user_id, role_id, service_id }
  * (accepts user_id as alias so existing callers don't break)
  */
-app.post("/addUserRole", async (req, res) => {
-  const portal_id = req.body.portal_id ?? req.body.user_id;
-  const { role_id, service_id } = req.body;
+app.post(
+  "/addUserRole",
+  authenticateToken,
+  requireServiceAdmin,
+  async (req, res) => {
+    const portal_id = req.body.portal_id ?? req.body.user_id;
+    const { role_id, service_id } = req.body;
 
-  if (!portal_id || !role_id || !service_id) {
-    return res
-      .status(400)
-      .json({
+    if (!portal_id || !role_id || !service_id) {
+      return res.status(400).json({
         success: false,
         message: "portal_id, role_id, and service_id are required",
       });
-  }
+    }
 
-  const { data, error } = await supabase.supabase
-    .from("user_service_roles")
-    .insert([{ portal_id, role_id, service_id }])
-    .select()
-    .single();
+    const { data, error } = await supabase.supabase
+      .from("user_service_roles")
+      .insert([{ portal_id, role_id, service_id }])
+      .select()
+      .single();
 
-  if (error) return err(res, error);
-  ok(res, { success: true, data });
-});
+    if (error) return err(res, error);
+    ok(res, { success: true, data });
+  },
+);
 
 /**
  * POST /addUserRoleBulk
  * Body: { users: string[], role_id, service_id }
  */
-app.post("/addUserRoleBulk", async (req, res) => {
-  const { users, role_id, service_id } = req.body;
+app.post(
+  "/addUserRoleBulk",
+  authenticateToken,
+  requireServiceAdmin,
+  async (req, res) => {
+    const { users, role_id, service_id } = req.body;
 
-  if (!Array.isArray(users) || users.length === 0) {
-    return res
-      .status(400)
-      .json({ success: false, message: "users must be a non-empty array" });
-  }
-  if (!role_id || !service_id) {
-    return res
-      .status(400)
-      .json({ success: false, message: "role_id and service_id are required" });
-  }
+    if (!Array.isArray(users) || users.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "users must be a non-empty array" });
+    }
+    if (!role_id || !service_id) {
+      return res.status(400).json({
+        success: false,
+        message: "role_id and service_id are required",
+      });
+    }
 
-  const rows = users.map((portal_id) => ({ portal_id, role_id, service_id }));
+    const rows = users.map((portal_id) => ({ portal_id, role_id, service_id }));
 
-  const { data, error } = await supabase.supabase
-    .from("user_service_roles")
-    .insert(rows)
-    .select();
+    const { data, error } = await supabase.supabase
+      .from("user_service_roles")
+      .insert(rows)
+      .select();
 
-  if (error) return err(res, error);
+    if (error) return err(res, error);
 
-  ok(res, {
-    success: true,
-    message: `Successfully added ${data?.length ?? rows.length} role assignments`,
-    inserted_count: data?.length ?? rows.length,
-    data,
-  });
-});
+    ok(res, {
+      success: true,
+      message: `Successfully added ${data?.length ?? rows.length} role assignments`,
+      inserted_count: data?.length ?? rows.length,
+      data,
+    });
+  },
+);
 
 /**
  * POST /updateUserRoleService
  * Body: { user_id, role_id, service_id }
  * FIX: removed reference to undefined variable `userServiceRoles`
  */
-app.post("/updateUserRoleService", async (req, res) => {
-  const { user_id, role_id, service_id } = req.body;
+app.post(
+  "/updateUserRoleService",
+  authenticateToken,
+  requireServiceAdmin,
+  async (req, res) => {
+    // Accept either portal_id (preferred) or user_id (legacy alias)
+    const portal_id = req.body.portal_id ?? req.body.user_id;
+    const { role_id, service_id } = req.body;
 
-  if (!user_id || !role_id || !service_id) {
-    return res
-      .status(400)
-      .json({
+    if (!portal_id || !role_id || !service_id) {
+      return res.status(400).json({
         success: false,
-        message: "user_id, role_id, and service_id are required",
+        message: "portal_id (or user_id), role_id, and service_id are required",
       });
-  }
+    }
 
-  const { data, error } = await supabase.supabase
-    .from("user_service_roles")
-    .update({ service_id })
-    .eq("user_id", user_id)
-    .eq("role_id", role_id)
-    .select();
+    const { data, error } = await supabase.supabase
+      .from("user_service_roles")
+      .update({ service_id })
+      .eq("portal_id", portal_id)
+      .eq("role_id", role_id)
+      .select();
 
-  if (error) return err(res, error);
+    if (error) return err(res, error);
 
-  ok(res, {
-    success: true,
-    message: `Updated ${data?.length ?? 0} role assignment(s)`,
-    updated_count: data?.length ?? 0,
-    data,
-  });
-});
+    ok(res, {
+      success: true,
+      message: `Updated ${data?.length ?? 0} role assignment(s)`,
+      updated_count: data?.length ?? 0,
+      data,
+    });
+  },
+);
 
 /**
  * DELETE /deleteUserRole/:serviceRoleId
  */
-app.delete("/deleteUserRole/:serviceRoleId", async (req, res) => {
-  const { serviceRoleId } = req.params;
-  if (!serviceRoleId) {
-    return res
-      .status(400)
-      .json({ success: false, message: "serviceRoleId is required" });
-  }
+app.delete(
+  "/deleteUserRole/:serviceRoleId",
+  authenticateToken,
+  requireServiceAdmin,
+  async (req, res) => {
+    const { serviceRoleId } = req.params;
+    if (!serviceRoleId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "serviceRoleId is required" });
+    }
 
-  const { error } = await supabase.supabase
-    .from("user_service_roles")
-    .delete()
-    .eq("id", serviceRoleId);
+    const { error } = await supabase.supabase
+      .from("user_service_roles")
+      .delete()
+      .eq("id", serviceRoleId);
 
-  if (error) return err(res, error);
-  ok(res, { success: true });
-});
+    if (error) return err(res, error);
+    ok(res, { success: true });
+  },
+);
 
 // ══════════════════════════════════════════════════════════════════════════════
 // READ — Services
@@ -262,45 +285,50 @@ app.get("/getServiceLessonOfWeek/:serviceId", async (req, res) => {
 // WRITE — Lessons
 // ══════════════════════════════════════════════════════════════════════════════
 
-app.post("/addserviceLesson", async (req, res) => {
-  const lesson = {
-    service: req.body.service,
-    title: req.body.title,
-    description: req.body.description,
-    verse: req.body.verse,
-    date_of_lesson: req.body.date_of_lesson,
-    assignee: req.body.assignee,
-  };
+app.post(
+  "/addserviceLesson",
+  authenticateToken,
+  requireServiceAdmin,
+  async (req, res) => {
+    const lesson = {
+      service: req.body.service,
+      title: req.body.title,
+      description: req.body.description,
+      verse: req.body.verse,
+      date_of_lesson: req.body.date_of_lesson,
+      assignee: req.body.assignee,
+    };
 
-  if (!lesson.service || !lesson.title) {
-    return res
-      .status(400)
-      .json({ success: false, message: "service and title are required" });
-  }
+    if (!lesson.service || !lesson.title) {
+      return res
+        .status(400)
+        .json({ success: false, message: "service and title are required" });
+    }
 
-  const { data, error } = await supabase.supabase
-    .from("service_lesson")
-    .insert([lesson])
-    .select()
-    .single();
+    const { data, error } = await supabase.supabase
+      .from("service_lesson")
+      .insert([lesson])
+      .select()
+      .single();
 
-  if (error) return err(res, error);
+    if (error) return err(res, error);
 
-  // Push notification — fire-and-forget, don't let it fail the response
-  try {
-    await axios.post(
-      `http://localhost:3000/notifications/sendSubscribedServicePushNotification/${lesson.service}`,
-      { title: "New Lesson Posted", body: lesson.title },
-    );
-  } catch (notifErr) {
-    console.warn(
-      "[services] Push notification failed (non-fatal):",
-      notifErr.message,
-    );
-  }
+    // Push notification — fire-and-forget, don't let it fail the response
+    try {
+      await axios.post(
+        `http://localhost:3000/notifications/sendSubscribedServicePushNotification/${lesson.service}`,
+        { title: "New Lesson Posted", body: lesson.title },
+      );
+    } catch (notifErr) {
+      console.warn(
+        "[services] Push notification failed (non-fatal):",
+        notifErr.message,
+      );
+    }
 
-  ok(res, { success: true, data });
-});
+    ok(res, { success: true, data });
+  },
+);
 
 // ══════════════════════════════════════════════════════════════════════════════
 // DS Teachers
@@ -329,89 +357,98 @@ app.get("/getDSTeachersByCourse/:course_id", async (req, res) => {
  * POST /updateDSTeacherCourse
  * FIX: removed reference to undefined variable `userServiceRoles`
  */
-app.post("/updateDSTeacherCourse", async (req, res) => {
-  const { teacher_id, role_id, course_id } = req.body;
+app.post(
+  "/updateDSTeacherCourse",
+  authenticateToken,
+  requireServiceAdmin,
+  async (req, res) => {
+    const { teacher_id, role_id, course_id } = req.body;
 
-  if (!teacher_id || !role_id || !course_id) {
-    return res
-      .status(400)
-      .json({
+    if (!teacher_id || !role_id || !course_id) {
+      return res.status(400).json({
         success: false,
         message: "teacher_id, role_id, and course_id are required",
       });
-  }
+    }
 
-  const { data, error } = await supabase.supabase
-    .from("ds_course_teachers")
-    .update({ course_id })
-    .eq("teacher_id", teacher_id)
-    .eq("role", role_id)
-    .select();
+    const { data, error } = await supabase.supabase
+      .from("ds_course_teachers")
+      .update({ course_id })
+      .eq("teacher_id", teacher_id)
+      .eq("role", role_id)
+      .select();
 
-  if (error) return err(res, error);
+    if (error) return err(res, error);
 
-  ok(res, {
-    success: true,
-    message: `Updated ${data?.length ?? 0} teacher assignment(s)`,
-    updated_count: data?.length ?? 0,
-    data,
-  });
-});
+    ok(res, {
+      success: true,
+      message: `Updated ${data?.length ?? 0} teacher assignment(s)`,
+      updated_count: data?.length ?? 0,
+      data,
+    });
+  },
+);
 
 /**
  * DELETE /deleteDSTeacher
  * Body: { teacher_id, course_id }
  */
-app.delete("/deleteDSTeacher", async (req, res) => {
-  const { teacher_id, course_id } = req.body;
+app.delete(
+  "/deleteDSTeacher",
+  authenticateToken,
+  requireServiceAdmin,
+  async (req, res) => {
+    const { teacher_id, course_id } = req.body;
 
-  if (!teacher_id || !course_id) {
-    return res
-      .status(400)
-      .json({
+    if (!teacher_id || !course_id) {
+      return res.status(400).json({
         success: false,
         message: "teacher_id and course_id are required",
       });
-  }
+    }
 
-  const { data, error } = await supabase.supabase
-    .from("ds_course_teachers")
-    .delete()
-    .match({ teacher_id, course_id })
-    .select();
+    const { data, error } = await supabase.supabase
+      .from("ds_course_teachers")
+      .delete()
+      .match({ teacher_id, course_id })
+      .select();
 
-  if (error) return err(res, error);
-  if (!data?.length)
-    return res
-      .status(404)
-      .json({ success: false, message: "No matching record found" });
+    if (error) return err(res, error);
+    if (!data?.length)
+      return res
+        .status(404)
+        .json({ success: false, message: "No matching record found" });
 
-  ok(res, { success: true, deleted: data.length });
-});
+    ok(res, { success: true, deleted: data.length });
+  },
+);
 
 /**
  * POST /addDSTeacher
  * Body: { teacher_id, course_id, role }
  */
-app.post("/addDSTeacher", async (req, res) => {
-  const { teacher_id, course_id, role } = req.body;
-  if (!teacher_id || !course_id) {
-    return res
-      .status(400)
-      .json({
+app.post(
+  "/addDSTeacher",
+  authenticateToken,
+  requireServiceAdmin,
+  async (req, res) => {
+    const { teacher_id, course_id, role } = req.body;
+    if (!teacher_id || !course_id) {
+      return res.status(400).json({
         success: false,
         message: "teacher_id and course_id are required",
       });
-  }
+    }
 
-  const { data, error } = await supabase.supabase
-    .from("ds_course_teachers")
-    .insert([{ teacher_id, course_id, role: role ?? "teacher" }])
-    .select()
-    .single();
+    const { data, error } = await supabase.supabase
+      .from("ds_course_teachers")
+      .insert([{ teacher_id, course_id, role: role ?? "teacher" }])
+      .select()
+      .single();
 
-  if (error) return err(res, error);
-  ok(res, { success: true, data });
-});
+    if (error) return err(res, error);
+    ok(res, { success: true, data });
+  },
+);
 
 module.exports = app;

@@ -14,6 +14,10 @@
 const express = require("express");
 const app = express();
 const supabase = require("../config/config");
+const {
+  authenticateToken,
+  requirePrivilegedRole,
+} = require("../middleware/auth");
 
 const DAYS = [
   "Sunday",
@@ -95,72 +99,87 @@ app.get("/getCalendarByDate/:index", async (req, res) => {
   res.send(data);
 });
 
-app.post("/addCalenderEvent", async (req, res) => {
-  const event = {
-    eventTitle: req.body.eventTitle,
-    repeated: req.body.repeated,
-    eventDay: req.body.eventDay,
-    location: req.body.location ?? null,
-    one_timeEventDate: req.body.one_timeEventDate ?? null,
-    // ← normalise so what's stored always matches what the user picked
-    starteventTime: normaliseTime(req.body.starteventTime),
-    endeventTime: normaliseTime(req.body.endeventTime),
-  };
+app.post(
+  "/addCalenderEvent",
+  authenticateToken,
+  requirePrivilegedRole,
+  async (req, res) => {
+    const event = {
+      eventTitle: req.body.eventTitle,
+      repeated: req.body.repeated,
+      eventDay: req.body.eventDay,
+      location: req.body.location ?? null,
+      one_timeEventDate: req.body.one_timeEventDate ?? null,
+      // ← normalise so what's stored always matches what the user picked
+      starteventTime: normaliseTime(req.body.starteventTime),
+      endeventTime: normaliseTime(req.body.endeventTime),
+    };
 
-  console.log("[addCalenderEvent] storing:", event);
+    console.log("[addCalenderEvent] storing:", event);
 
-  const { data, error } = await supabase.supabase
-    .from("calendar")
-    .insert(event)
-    .select();
+    const { data, error } = await supabase.supabase
+      .from("calendar")
+      .insert(event)
+      .select();
 
-  if (error) {
-    console.error(error);
-    return res.status(500).send(error.message);
-  }
-  res.send(data);
-});
+    if (error) {
+      console.error(error);
+      return res.status(500).send(error.message);
+    }
+    res.send(data);
+  },
+);
 
-app.post("/updateCalenderEvent/:index", async (req, res) => {
-  const id = parseInt(req.params.index, 10);
+app.post(
+  "/updateCalenderEvent/:index",
+  authenticateToken,
+  requirePrivilegedRole,
+  async (req, res) => {
+    const id = parseInt(req.params.index, 10);
 
-  const event = {
-    eventTitle: req.body.eventTitle,
-    repeated: req.body.repeated,
-    eventDay: req.body.eventDay,
-    location: req.body.location ?? null,
-    one_timeEventDate: req.body.one_timeEventDate ?? null,
-    // ← same normalisation on update
-    starteventTime: normaliseTime(req.body.starteventTime),
-    endeventTime: normaliseTime(req.body.endeventTime),
-  };
+    const event = {
+      eventTitle: req.body.eventTitle,
+      repeated: req.body.repeated,
+      eventDay: req.body.eventDay,
+      location: req.body.location ?? null,
+      one_timeEventDate: req.body.one_timeEventDate ?? null,
+      // ← same normalisation on update
+      starteventTime: normaliseTime(req.body.starteventTime),
+      endeventTime: normaliseTime(req.body.endeventTime),
+    };
 
-  console.log("[updateCalenderEvent] id:", id, "storing:", event);
+    console.log("[updateCalenderEvent] id:", id, "storing:", event);
 
-  const { data, error } = await supabase.supabase
-    .from("calendar")
-    .update(event)
-    .eq("id", id)
-    .select();
+    const { data, error } = await supabase.supabase
+      .from("calendar")
+      .update(event)
+      .eq("id", id)
+      .select();
 
-  if (error) {
-    console.error(error);
-    return res.status(500).send(error.message);
-  }
-  res.send(data);
-});
+    if (error) {
+      console.error(error);
+      return res.status(500).send(error.message);
+    }
+    res.send(data);
+  },
+);
 
-app.delete("/deleteCalenderEvent/:index", async (req, res) => {
-  const { error } = await supabase.supabase
-    .from("calendar")
-    .delete()
-    .match({ id: req.params.index });
+app.delete(
+  "/deleteCalenderEvent/:index",
+  authenticateToken,
+  requirePrivilegedRole,
+  async (req, res) => {
+    const { error } = await supabase.supabase
+      .from("calendar")
+      .delete()
+      .match({ id: req.params.index });
 
-  if (error) {
-    console.error(error);
-    return res.status(500).send(error.message);
-  }
-  res.send({ success: true });
-});
+    if (error) {
+      console.error(error);
+      return res.status(500).send(error.message);
+    }
+    res.send({ success: true });
+  },
+);
 
 module.exports = app;
