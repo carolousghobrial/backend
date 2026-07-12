@@ -240,10 +240,9 @@ process.on("uncaughtException", (error) => {
   process.exit(1);
 });
 
-// Handle unhandled promise rejections
+// Handle unhandled promise rejections — log but do NOT crash the server
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
-  process.exit(1);
 });
 
 // ==================== SERVER STARTUP ====================

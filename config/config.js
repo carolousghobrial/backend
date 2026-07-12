@@ -12,7 +12,8 @@ const supabaseKey =
 
 const missingVars = [];
 if (!supabaseUrl) missingVars.push("SUPABASE_URL");
-if (!supabaseKey) missingVars.push("SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY)");
+if (!supabaseKey)
+  missingVars.push("SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY)");
 if (!jwtSecret) missingVars.push("JWT_SECRET");
 if (missingVars.length > 0) {
   console.warn(
@@ -43,13 +44,19 @@ if (!supabaseUrl || !supabaseKey) {
     },
   );
 
-  module.exports = { supabase: supabaseProxy, port, nodeEnv, isDevelopment, jwtSecret };
+  module.exports = {
+    supabase: supabaseProxy,
+    port,
+    nodeEnv,
+    isDevelopment,
+    jwtSecret,
+  };
 } else {
   const supabase = createClient(supabaseUrl, supabaseKey, {
     auth: {
-      persistSession: true, // keeps session in memory (frontend only, no effect on Node backend)
-      autoRefreshToken: true, // automatically refreshes token (frontend only)
-      detectSessionInUrl: true, // frontend use for OAuth redirects
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
     },
   });
 
