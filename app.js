@@ -247,8 +247,15 @@ process.on("unhandledRejection", (reason, promise) => {
 
 // ==================== SERVER STARTUP ====================
 
-const server = app.listen(port, () => {
-  console.log(`
+// On Vercel (and any serverless platform) the app is invoked as an exported
+// request handler — we must NOT call app.listen() or bind a port there, or the
+// function fails to initialize (FUNCTION_INVOCATION_FAILED). Only start a real
+// long-running server when running directly (local dev / traditional hosts).
+const isServerless = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+
+if (!isServerless) {
+  const server = app.listen(port, () => {
+    console.log(`
 🚀 St. George Coptic Orthodox Church API Server Started
 📍 Port: ${port}
 🌍 Environment: ${nodeEnv}
@@ -256,43 +263,29 @@ const server = app.listen(port, () => {
 🔗 Health check: http://localhost:${port}/health
 📚 API docs: http://localhost:${port}/
   `);
-});
+  });
 
-// Keep-alive self-ping to prevent Heroku dyno from sleeping (every 25 minutes)
-if (!isDevelopment) {
-  const KEEP_ALIVE_URL =
-    "https://backend-iota-seven-18.vercel.app/health";
-  setInterval(
-    () => {
-      axios.get(KEEP_ALIVE_URL).catch((err) => {
-        console.warn("Keep-alive ping failed:", err.message);
-      });
-    },
-    25 * 60 * 1000,
-  );
-  console.log("Keep-alive ping scheduled every 25 minutes.");
-}
-
-// Handle server errors
-server.on("error", (error) => {
-  if (error.syscall !== "listen") {
-    throw error;
-  }
-
-  const bind = typeof port === "string" ? "Pipe " + port : "Port " + port;
-
-  switch (error.code) {
-    case "EACCES":
-      console.error(`${bind} requires elevated privileges`);
-      process.exit(1);
-      break;
-    case "EADDRINUSE":
-      console.error(`${bind} is already in use`);
-      process.exit(1);
-      break;
-    default:
+  // Handle server errors
+  server.on("error", (error) => {
+    if (error.syscall !== "listen") {
       throw error;
-  }
-});
+    }
+
+    const bind = typeof port === "string" ? "Pipe " + port : "Port " + port;
+
+    switch (error.code) {
+      case "EACCES":
+        console.error(`${bind} requires elevated privileges`);
+        process.exit(1);
+        break;
+      case "EADDRINUSE":
+        console.error(`${bind} is already in use`);
+        process.exit(1);
+        break;
+      default:
+        throw error;
+    }
+  });
+}
 
 module.exports = app;
