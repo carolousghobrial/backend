@@ -1,4 +1,4 @@
-# St. George Coptic Orthodox Church Nashville — Project Instructions
+﻿# St. George Coptic Orthodox Church Nashville — Project Instructions
 
 ## Project Overview
 Full-stack church management system for St. George Coptic Orthodox Church Nashville.
@@ -16,7 +16,7 @@ Three sub-projects share this workspace:
 | Mobile | React Native, Expo, Redux Toolkit, Redux Persist, Expo Notifications |
 | Database | Supabase (PostgreSQL) — accessed via `supabase-js` |
 | Auth | JWT tokens (localStorage on web, SecureStore on mobile) |
-| Deploy (BE) | Heroku — `https://stgntbackend-a14a35aa352d.herokuapp.com` |
+| Deploy (BE) | Heroku — `https://backend-iota-seven-18.vercel.app` |
 | Deploy (FE) | Azure Static Web Apps — `https://stgeorgecocnashville.org` |
 
 ## Brand & Design Tokens

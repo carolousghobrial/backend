@@ -1,4 +1,4 @@
----
+﻿---
 name: new-rn-screen
 description: "Create a new React Native screen for the STGNT Expo mobile app. Use when adding a screen, tab, or navigation entry to STGNT/, including Expo Router file setup, component structure, API helper, and optional Redux slice."
 argument-hint: "Screen name and purpose, e.g. 'DonationScreen — list and submit church donations'"
@@ -76,7 +76,7 @@ const styles = StyleSheet.create({
 ### 3. Create or Update `STGNT/helpers/<resource>Service.js`
 ```js
 import axios from 'axios';
-const BASE_URL = 'https://stgntbackend-a14a35aa352d.herokuapp.com';
+const BASE_URL = 'https://backend-iota-seven-18.vercel.app';
 
 export const getAll<Resource>s = async (token) => {
   const res = await axios.get(`${BASE_URL}/<resource>/getAll<Resource>s`, {

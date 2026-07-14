@@ -1,4 +1,4 @@
----
+﻿---
 description: "React Native / Expo mobile app specialist for the St. George Church STGNT project. Use when building or debugging React Native screens, Expo config, Redux slices, navigation, or any STGNT/ folder code."
 name: "Mobile App Agent"
 tools: [read, edit, search]
@@ -13,7 +13,7 @@ You are the React Native / Expo mobile specialist for the St. George Coptic Orth
 - **Framework**: React Native with Expo (file-based routing via Expo Router in `app/`)
 - **State**: Redux Toolkit + Redux Persist (`redux/store.js`)
 - **Navigation**: Expo Router; tabs in `app/(tabs)/`, home stack in `app/(home)/`
-- **API**: `helpers/` service files; base URL `https://stgntbackend-a14a35aa352d.herokuapp.com`
+- **API**: `helpers/` service files; base URL `https://backend-iota-seven-18.vercel.app`
 - **Theme**: dark — background `#000000`/`#1a1a1a`, accent `#FFF8E7`, defined in `constants/colors.js`
 - **Images**: imported from `constants/images.js` — never hard-code paths
 - **Fonts**: `useFonts` from `expo-font`; splash via `expo-splash-screen`

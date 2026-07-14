@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const app = express();
 const { port, nodeEnv, isDevelopment } = require("./config/config");
 const axios = require("axios");
@@ -43,7 +43,7 @@ app.use((req, res, next) => {
     // Your production website
     "https://www.stgeorgecocnashville.org",
     "https://stgeorgecocnashville.org",
-    "https://stgntbackend-a14a35aa352d.herokuapp.com",
+    "https://backend-iota-seven-18.vercel.app",
   ];
 
   const origin = req.headers.origin;
@@ -261,7 +261,7 @@ const server = app.listen(port, () => {
 // Keep-alive self-ping to prevent Heroku dyno from sleeping (every 25 minutes)
 if (!isDevelopment) {
   const KEEP_ALIVE_URL =
-    "https://stgntbackend-a14a35aa352d.herokuapp.com/health";
+    "https://backend-iota-seven-18.vercel.app/health";
   setInterval(
     () => {
       axios.get(KEEP_ALIVE_URL).catch((err) => {

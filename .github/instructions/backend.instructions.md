@@ -1,4 +1,4 @@
----
+﻿---
 description: "Use when creating, editing, or reviewing Express routes, middleware, Supabase queries, or backend Node.js code. Covers route patterns, auth, Supabase client usage, error handling, and response format."
 applyTo: "**/*.js"
 ---
@@ -41,5 +41,5 @@ res.status(500).json({ success: false, error: error.message });
 
 ## Push Notifications (announcements)
 After mutating an announcement, send via:
-`POST https://stgntbackend-a14a35aa352d.herokuapp.com/notifications/sendPushNotification`
+`POST https://backend-iota-seven-18.vercel.app/notifications/sendPushNotification`
 Wrap in try/catch — do NOT fail the main operation if the notification call fails.

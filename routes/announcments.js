@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const bp = require("body-parser");
 const app = express();
 const supabase = require("../config/config");
@@ -43,7 +43,7 @@ app.get("/", (req, res) => {
 const sendAnnouncementNotification = async (title, body, isEdit = false) => {
   try {
     const notificationEndpoint =
-      "https://stgntbackend-a14a35aa352d.herokuapp.com/notifications/sendPushNotification";
+      "https://backend-iota-seven-18.vercel.app/notifications/sendPushNotification";
 
     const requestBody = {
       title: isEdit ? `Updated: ${title}` : title,
