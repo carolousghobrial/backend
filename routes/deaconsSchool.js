@@ -12,6 +12,21 @@ const {
   requireTeacherAssignedToCourse,
   requireTeacherAssignedToCourseForBatch,
 } = require("../middleware/auth");
+const {
+  classifyCourse,
+  decideNextBracket,
+  resolveCourse,
+} = require("../utils/promotionRules");
+
+// ── Stripe (re-enrollment fee) ────────────────────────────────────────────────
+const REENROLLMENT_FEE_CENTS = 2500; // $25.00
+const getStripeClient = () => {
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeSecretKey) {
+    return null;
+  }
+  return require("stripe")(stripeSecretKey);
+};
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
@@ -1813,7 +1828,8 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           last_name,
           email,
           cellphone,
-          grade_level
+          grade_level,
+          gender
         )`,
         { count: "exact" },
       )
@@ -1867,6 +1883,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           is_active: enrollment.is_active,
           profile_pic: profileImageUrl,
           grade_level: enrollment.profiles.grade_level || null,
+          gender: enrollment.profiles.gender || null,
         };
       }),
     );
@@ -2008,7 +2025,8 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           last_name,
           email,
           cellphone,
-          grade_level
+          grade_level,
+          gender
         )`,
       )
       .eq("course_id", courseId)
@@ -2057,6 +2075,7 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           is_active: enrollment.is_active,
           profile_pic: profileImageUrl,
           grade_level: enrollment.profiles.grade_level || null,
+          gender: enrollment.profiles.gender || null,
         };
       }),
     );
@@ -3121,15 +3140,217 @@ app.post("/unenrollStudent", async (req, res) => {
   }
 });
 
+// ── Suggested next course: computes the level a student is headed into for
+// the current (registration-open) academic year, based on their most recent
+// prior enrollment, final grade, and profile gender/grade_level. Does NOT
+// enroll anyone — the student still submits the registration form themselves.
+app.get("/suggestedNextCourse/:portalId", async (req, res) => {
+  try {
+    const { portalId } = req.params;
+
+    const { data: profile, error: profileErr } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id, gender, grade_level")
+      .eq("portal_id", portalId)
+      .single();
+    if (profileErr || !profile) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Student profile not found" });
+    }
+
+    // The class the student most recently completed — their latest active
+    // enrollment, whichever academic year that happens to be.
+    const { data: recentEnrollments, error: enrollErr } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select(
+        `enrollment_id, student_id, course_id, academic_year, enrolled_date, is_active,
+         ds_courses:course_id ( course_id, class_name, level, academic_year )`,
+      )
+      .eq("student_id", portalId)
+      .eq("is_active", true)
+      .order("enrolled_date", { ascending: false })
+      .limit(1);
+    if (enrollErr) {
+      return res.status(500).json({ success: false, error: enrollErr.message });
+    }
+
+    const previous = recentEnrollments && recentEnrollments[0];
+    if (!previous || !previous.ds_courses) {
+      return res.json({
+        success: true,
+        data: { suggested_course_id: null, reason: "new_student" },
+      });
+    }
+    const completedYear =
+      previous.ds_courses.academic_year || previous.academic_year || "";
+
+    // The "upcoming" year is the next academic year after the one just
+    // completed. year_label is a fixed "YYYY-YYYY" format, so a plain string
+    // comparison orders the years correctly.
+    const { data: allYears } = await supabase.supabase
+      .from("ds_academic_years")
+      .select("year_label");
+    const upcomingYear = (allYears || [])
+      .map((y) => y.year_label)
+      .filter((label) => label > completedYear)
+      .sort()[0];
+
+    // Final grade for the completed course (drives pass/fail promotion).
+    const { data: grade } = await supabase.supabase
+      .from("ds_student_final_grades")
+      .select("is_passing_year, weighted_percentage")
+      .eq("student_id", portalId)
+      .eq("course_id", previous.course_id)
+      .maybeSingle();
+
+    const baseData = {
+      previous_class_name: previous.ds_courses.class_name,
+      previous_academic_year: completedYear,
+      upcoming_academic_year: upcomingYear || null,
+      is_passing_year: grade?.is_passing_year ?? null,
+      final_grade: grade?.weighted_percentage ?? null,
+    };
+
+    if (!upcomingYear) {
+      return res.json({
+        success: true,
+        data: { ...baseData, suggested_course_id: null, reason: "no_upcoming_year" },
+      });
+    }
+
+    const bracket = classifyCourse(previous.ds_courses);
+    if (bracket === "graduates") {
+      return res.json({
+        success: true,
+        data: { ...baseData, suggested_course_id: null, reason: "graduated" },
+      });
+    }
+
+    const decision = decideNextBracket({
+      bracket,
+      gender: profile.gender || "",
+      gradeLevel: profile.grade_level || "",
+      passed: !!grade?.is_passing_year,
+    });
+
+    if (!decision) {
+      return res.json({
+        success: true,
+        data: { ...baseData, suggested_course_id: null, reason: "no_suggestion" },
+      });
+    }
+
+    const { data: targetCourses, error: targetErr } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id, class_name, level, academic_year")
+      .eq("academic_year", upcomingYear)
+      .eq("is_active", true);
+    if (targetErr) {
+      return res.status(500).json({ success: false, error: targetErr.message });
+    }
+
+    const match = resolveCourse(targetCourses, decision);
+
+    return res.json({
+      success: true,
+      data: {
+        ...baseData,
+        suggested_course_id: match ? match.course_id : null,
+        suggested_class_name: match ? match.class_name : null,
+        reason: match ? (grade?.is_passing_year ? "promoted" : "repeated") : "no_match",
+      },
+    });
+  } catch (err) {
+    console.error("suggestedNextCourse error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// ── Create a Stripe PaymentIntent for the $25 re-enrollment fee ────────────────
+app.post("/createReenrollmentPaymentIntent", authenticateToken, async (req, res) => {
+  try {
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe is not configured on the server",
+      });
+    }
+
+    const { student_id } = req.body;
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: REENROLLMENT_FEE_CENTS,
+      currency: "usd",
+      description: "Deacons School Re-enrollment Fee",
+      metadata: {
+        purpose: "ds_reenrollment",
+        student_id: student_id ? String(student_id) : "",
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+    });
+  } catch (err) {
+    console.error("Error creating re-enrollment payment intent:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to initiate payment",
+    });
+  }
+});
+
 // ── Self-enrollment: student enrolls themselves for the current academic year ──
 app.post("/selfEnroll", authenticateToken, async (req, res) => {
   try {
-    const { student_id, course_id } = req.body;
+    const { student_id, course_id, payment_intent_id } = req.body;
 
     if (!student_id || !course_id) {
       return res.status(400).json({
         success: false,
         error: "student_id and course_id are required",
+      });
+    }
+
+    // A successful $25 re-enrollment payment is required before enrolling.
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe is not configured on the server",
+      });
+    }
+    if (!payment_intent_id) {
+      return res.status(402).json({
+        success: false,
+        error: "Payment is required to complete re-enrollment",
+      });
+    }
+
+    let paymentIntent;
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
+    } catch (e) {
+      return res.status(402).json({
+        success: false,
+        error: "Could not verify payment. Please try again.",
+      });
+    }
+    if (
+      !paymentIntent ||
+      paymentIntent.status !== "succeeded" ||
+      paymentIntent.amount !== REENROLLMENT_FEE_CENTS ||
+      paymentIntent.currency !== "usd" ||
+      paymentIntent.metadata?.purpose !== "ds_reenrollment" ||
+      String(paymentIntent.metadata?.student_id || "") !== String(student_id)
+    ) {
+      return res.status(402).json({
+        success: false,
+        error:
+          "Payment not completed or invalid. Please complete the $25 fee before re-enrolling.",
       });
     }
 
@@ -3168,19 +3389,35 @@ app.post("/selfEnroll", authenticateToken, async (req, res) => {
       });
     }
 
-    // Get current academic year
-    const { data: currentYear, error: yearError } = await supabase.supabase
-      .from("ds_academic_years")
-      .select("year_label")
-      .eq("is_current", true)
+    // Enroll into the academic year the chosen course actually belongs to
+    // (e.g. the upcoming year), falling back to the current year if the course
+    // has none recorded.
+    const { data: course, error: courseError } = await supabase.supabase
+      .from("ds_courses")
+      .select("academic_year")
+      .eq("course_id", course_id)
       .single();
 
-    if (yearError || !currentYear) {
+    if (courseError || !course) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Course not found" });
+    }
+
+    let academic_year = course.academic_year;
+    if (!academic_year) {
+      const { data: currentYear } = await supabase.supabase
+        .from("ds_academic_years")
+        .select("year_label")
+        .eq("is_current", true)
+        .single();
+      academic_year = currentYear?.year_label;
+    }
+    if (!academic_year) {
       return res
         .status(500)
         .json({ success: false, error: "No active academic year found" });
     }
-    const academic_year = currentYear.year_label;
 
     // Check if already actively enrolled in ANY course this year
     const { data: existingActive } = await supabase.supabase
@@ -3664,6 +3901,78 @@ app.post("/bulkUpdateGradeLevels", async (req, res) => {
     });
   } catch (err) {
     console.error("bulkUpdateGradeLevels error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// POST /bulkUpdateGender
+// Updates gender for multiple students in the profiles table
+app.post("/bulkUpdateGender", async (req, res) => {
+  try {
+    const { updates } = req.body;
+
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid request: updates array is required",
+      });
+    }
+
+    // Validate each update has required fields
+    for (const update of updates) {
+      if (!update.portal_id || !update.gender) {
+        return res.status(400).json({
+          success: false,
+          error: "Each update must have portal_id and gender",
+        });
+      }
+      if (!["male", "female"].includes(update.gender)) {
+        return res.status(400).json({
+          success: false,
+          error: "gender must be 'male' or 'female'",
+        });
+      }
+    }
+
+    const results = [];
+    const errors = [];
+
+    // Update each student's gender
+    for (const update of updates) {
+      const { data, error } = await supabase.supabase
+        .from("profiles")
+        .update({ gender: update.gender })
+        .eq("portal_id", update.portal_id)
+        .select()
+        .single();
+
+      if (error) {
+        errors.push({
+          portal_id: update.portal_id,
+          error: error.message,
+        });
+      } else {
+        results.push(data);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(207).json({
+        success: true,
+        data: results,
+        partial: true,
+        errors,
+        message: `Updated ${results.length} of ${updates.length} students`,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: results,
+      message: `Successfully updated ${results.length} student(s)`,
+    });
+  } catch (err) {
+    console.error("bulkUpdateGender error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
