@@ -43,7 +43,7 @@ app.use((req, res, next) => {
     // Your production website
     "https://www.stgeorgecocnashville.org",
     "https://stgeorgecocnashville.org",
-    "https://backend-iota-seven-18.vercel.app",
+    "https://backend-nine-cyan-78.vercel.app",
   ];
 
   const origin = req.headers.origin;

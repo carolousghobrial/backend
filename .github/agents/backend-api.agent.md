@@ -13,7 +13,7 @@ You are the backend API specialist for the St. George Coptic Orthodox Church Nas
 - **Runtime**: Node.js with Express (CommonJS `require`)
 - **Database**: Supabase PostgreSQL via `supabase-js` — always use `supabase.supabase.from(...)`
 - **Auth**: JWT (`jsonwebtoken`); verify `Authorization: Bearer <token>` on protected routes
-- **Notifications**: Push via `POST https://backend-iota-seven-18.vercel.app/notifications/sendPushNotification`
+- **Notifications**: Push via `POST https://backend-nine-cyan-78.vercel.app/notifications/sendPushNotification`
 - **Deploy**: Heroku; respect the `trust proxy` setting already in `app.js`
 
 ## Behavior

@@ -43,7 +43,7 @@ app.get("/", (req, res) => {
 const sendAnnouncementNotification = async (title, body, isEdit = false) => {
   try {
     const notificationEndpoint =
-      "https://backend-iota-seven-18.vercel.app/notifications/sendPushNotification";
+      "https://backend-nine-cyan-78.vercel.app/notifications/sendPushNotification";
 
     const requestBody = {
       title: isEdit ? `Updated: ${title}` : title,

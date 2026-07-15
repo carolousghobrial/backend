@@ -76,7 +76,7 @@ const styles = StyleSheet.create({
 ### 3. Create or Update `STGNT/helpers/<resource>Service.js`
 ```js
 import axios from 'axios';
-const BASE_URL = 'https://backend-iota-seven-18.vercel.app';
+const BASE_URL = 'https://backend-nine-cyan-78.vercel.app';
 
 export const getAll<Resource>s = async (token) => {
   const res = await axios.get(`${BASE_URL}/<resource>/getAll<Resource>s`, {

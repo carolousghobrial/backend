@@ -16,7 +16,7 @@ Three sub-projects share this workspace:
 | Mobile | React Native, Expo, Redux Toolkit, Redux Persist, Expo Notifications |
 | Database | Supabase (PostgreSQL) — accessed via `supabase-js` |
 | Auth | JWT tokens (localStorage on web, SecureStore on mobile) |
-| Deploy (BE) | Heroku — `https://backend-iota-seven-18.vercel.app` |
+| Deploy (BE) | Vercel — `https://backend-nine-cyan-78.vercel.app` |
 | Deploy (FE) | Azure Static Web Apps — `https://stgeorgecocnashville.org` |
 
 ## Brand & Design Tokens

@@ -41,5 +41,5 @@ res.status(500).json({ success: false, error: error.message });
 
 ## Push Notifications (announcements)
 After mutating an announcement, send via:
-`POST https://backend-iota-seven-18.vercel.app/notifications/sendPushNotification`
+`POST https://backend-nine-cyan-78.vercel.app/notifications/sendPushNotification`
 Wrap in try/catch — do NOT fail the main operation if the notification call fails.
