@@ -78,6 +78,7 @@ const AUTH_EXEMPT_ROUTES = new Set([
   "/enrollStudent",
   "/unenrollStudent",
   "/selfEnroll",
+  "/registrationRequest",
 ]);
 
 app.use((req, res, next) => {
@@ -3487,6 +3488,175 @@ app.post("/selfEnroll", authenticateToken, async (req, res) => {
     return res.json({ success: true, message: "Enrolled successfully", data });
   } catch (err) {
     console.error("selfEnroll error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// ─── DS REGISTRATION REQUESTS (manual "I'm new / connect my account") ─────────
+// Public submission when the DOB+last-name lookup finds no directory record.
+// A coordinator later links the request to a portal profile or rejects it.
+
+// Public: submit a manual registration request.
+app.post("/registrationRequest", async (req, res) => {
+  try {
+    const {
+      first_name,
+      last_name,
+      dob,
+      cellphone,
+      email,
+      previous_level,
+      notes,
+    } = req.body || {};
+
+    if (!first_name?.trim() || !last_name?.trim() || !dob) {
+      return res.status(400).json({
+        success: false,
+        error: "First name, last name, and date of birth are required",
+      });
+    }
+    if (!email?.trim() && !cellphone?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Please provide an email or a phone number so we can reach you",
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_registration_requests")
+      .insert([
+        {
+          first_name: first_name.trim(),
+          last_name: last_name.trim(),
+          dob,
+          cellphone: cellphone?.trim() || null,
+          email: email?.trim()?.toLowerCase() || null,
+          previous_level: previous_level?.trim() || null,
+          notes: notes?.trim() || null,
+          status: "pending",
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("registrationRequest insert error:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    return res.json({
+      success: true,
+      message:
+        "Thanks! We received your information and will connect your account shortly.",
+      data,
+    });
+  } catch (err) {
+    console.error("registrationRequest error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Admin: list registration requests (GET is not caught by the mutation guard,
+// so authenticate + authorize explicitly here).
+app.get(
+  "/registrationRequests",
+  authenticateToken,
+  requireDeaconsSchoolWrite,
+  async (req, res) => {
+    try {
+      const status = (req.query.status || "pending").trim();
+      const { page, limit, from, to } = parsePagination(req.query, 50);
+      let query = supabase.supabase
+        .from("ds_registration_requests")
+        .select("*", { count: "exact" })
+        .order("created_at", { ascending: false })
+        .range(from, to);
+      if (status && status !== "all") query = query.eq("status", status);
+
+      const { data, error, count } = await query;
+      if (error)
+        return res.status(500).json({ success: false, error: error.message });
+      res.json({
+        success: true,
+        data,
+        pagination: {
+          total: count,
+          page,
+          limit,
+          totalPages: Math.ceil((count || 0) / limit),
+        },
+      });
+    } catch (err) {
+      console.error("list registrationRequests error:", err);
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  },
+);
+
+// Admin: link a request to a portal profile (mutation → auto-guarded).
+app.post("/registrationRequests/:id/link", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { portal_id } = req.body || {};
+    if (!portal_id) {
+      return res
+        .status(400)
+        .json({ success: false, error: "portal_id is required" });
+    }
+
+    // Make sure the portal profile actually exists.
+    const { data: profile, error: profErr } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id")
+      .eq("portal_id", portal_id)
+      .maybeSingle();
+    if (profErr)
+      return res.status(500).json({ success: false, error: profErr.message });
+    if (!profile)
+      return res
+        .status(404)
+        .json({ success: false, error: "No profile with that portal_id" });
+
+    const { data, error } = await supabase.supabase
+      .from("ds_registration_requests")
+      .update({
+        status: "linked",
+        linked_portal_id: portal_id,
+        reviewed_by: req.authPortalId || null,
+        reviewed_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("link registrationRequest error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Admin: reject a request (mutation → auto-guarded).
+app.post("/registrationRequests/:id/reject", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase.supabase
+      .from("ds_registration_requests")
+      .update({
+        status: "rejected",
+        reviewed_by: req.authPortalId || null,
+        reviewed_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .select()
+      .single();
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("reject registrationRequest error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });

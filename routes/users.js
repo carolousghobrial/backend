@@ -218,6 +218,320 @@ app.post("/login/phone/verify-otp", async (req, res) => {
   }
 });
 
+// ==================== DEACON SCHOOL SELF-SERVICE SIGN-IN ====================
+// Flow for people who don't know their login: identify them from the church
+// directory (`profiles`) by DOB + last name, then email a magic sign-in link
+// to the address on file. Login-less directory records get an account created
+// and reconciled on first sign-in (see /login/ds/claim-profile).
+
+// Mask an email for display: "john@gmail.com" -> "j•••@gmail.com"
+function maskEmail(email) {
+  if (!email || typeof email !== "string" || !email.includes("@")) return null;
+  const [local, domain] = email.split("@");
+  const head = local.slice(0, 1);
+  return `${head}•••@${domain}`;
+}
+
+// Digits-only, last 10, for tolerant phone comparison.
+function normalizePhone(phone) {
+  if (!phone) return "";
+  const digits = String(phone).replace(/\D/g, "");
+  return digits.slice(-10);
+}
+
+// Return the [start, endExclusive) yyyy-mm-dd bounds for a single calendar day,
+// so a DATE or TIMESTAMP `dob` column both match a "1998-04-12" input.
+function dayBounds(dobInput) {
+  const d = new Date(`${dobInput}T00:00:00Z`);
+  if (isNaN(d.getTime())) return null;
+  const next = new Date(d.getTime() + 24 * 60 * 60 * 1000);
+  return { start: d.toISOString().slice(0, 10), end: next.toISOString().slice(0, 10) };
+}
+
+// Find directory profiles matching last_name + dob, narrowed by first_name /
+// cellphone when supplied. Returns { matches, all } where `matches` is the
+// narrowed set.
+async function findDirectoryMatches({ last_name, dob, first_name, cellphone }) {
+  const bounds = dayBounds(dob);
+  if (!bounds) return { error: "Invalid date of birth", matches: [] };
+
+  const { data, error } = await supabase.supabase
+    .from("profiles")
+    .select(
+      "id, portal_id, first_name, last_name, email, cellphone, dob, family_id, family_role, grade_level, gender",
+    )
+    .ilike("last_name", last_name.trim())
+    .gte("dob", bounds.start)
+    .lt("dob", bounds.end);
+
+  if (error) return { error: error.message, matches: [] };
+
+  let matches = data || [];
+  if (first_name && first_name.trim()) {
+    const fn = first_name.trim().toLowerCase();
+    matches = matches.filter((p) => (p.first_name || "").toLowerCase() === fn);
+  }
+  if (cellphone && normalizePhone(cellphone)) {
+    const want = normalizePhone(cellphone);
+    const byPhone = matches.filter((p) => normalizePhone(p.cellphone) === want);
+    // Only apply the phone filter if it actually narrows to something.
+    if (byPhone.length > 0) matches = byPhone;
+  }
+  return { matches };
+}
+
+// Does this profile row already have a Supabase auth login?
+async function profileHasLogin(profileId) {
+  try {
+    const { data, error } = await supabase.supabase.auth.admin.getUserById(
+      profileId,
+    );
+    return !error && !!data?.user;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Step 1 — Look up a person from the directory by DOB + last name.
+ * Never returns the raw email; only whether we can reach them and a masked hint.
+ */
+app.post("/login/ds/lookup", async (req, res) => {
+  try {
+    const { last_name, dob, first_name, cellphone } = req.body || {};
+    if (!last_name || !dob) {
+      return res.status(400).json({
+        success: false,
+        message: "Last name and date of birth are required",
+      });
+    }
+
+    const { matches, error } = await findDirectoryMatches({
+      last_name,
+      dob,
+      first_name,
+      cellphone,
+    });
+    if (error) {
+      return res.status(400).json({ success: false, message: error });
+    }
+
+    if (matches.length === 0) {
+      return res.json({ success: true, matched: false });
+    }
+
+    if (matches.length > 1) {
+      // Ambiguous — ask for more identifying info instead of revealing anyone.
+      return res.json({
+        success: true,
+        matched: false,
+        ambiguous: true,
+        needMore: ["first_name", "cellphone"],
+      });
+    }
+
+    const p = matches[0];
+    const hasLogin = await profileHasLogin(p.id);
+    return res.json({
+      success: true,
+      matched: true,
+      hasEmail: !!p.email,
+      emailHint: maskEmail(p.email),
+      hasLogin,
+      firstName: p.first_name || null,
+    });
+  } catch (err) {
+    console.error("ds lookup error:", err);
+    return res.status(500).json({ success: false, message: "Lookup failed" });
+  }
+});
+
+/**
+ * Step 2 — Send the magic sign-in link.
+ * Re-runs the match server-side (single result required). Always sends to the
+ * email ON FILE when one exists (a supplied email is only used when the record
+ * has none) — this prevents redirecting someone else's link to an attacker.
+ */
+app.post("/login/ds/send-magic-link", async (req, res) => {
+  try {
+    const { last_name, dob, first_name, cellphone, email } = req.body || {};
+    if (!last_name || !dob) {
+      return res.status(400).json({
+        success: false,
+        message: "Last name and date of birth are required",
+      });
+    }
+
+    const { matches, error } = await findDirectoryMatches({
+      last_name,
+      dob,
+      first_name,
+      cellphone,
+    });
+    if (error) return res.status(400).json({ success: false, message: error });
+
+    if (matches.length !== 1) {
+      // 0 or ambiguous — don't send anything, don't leak which.
+      return res.status(409).json({
+        success: false,
+        message:
+          matches.length === 0
+            ? "We couldn't find a matching record."
+            : "We need more information to identify you.",
+        ambiguous: matches.length > 1,
+      });
+    }
+
+    const p = matches[0];
+    const onFileEmail = (p.email || "").trim();
+    const suppliedEmail = (email || "").trim();
+    const targetEmail = onFileEmail || suppliedEmail;
+
+    if (!targetEmail) {
+      return res.status(400).json({
+        success: false,
+        message: "No email on file. Please provide an email address.",
+        needEmail: true,
+      });
+    }
+
+    // If the caller supplied an email but we already have one on file, persist
+    // the on-file email choice and ignore the supplied value silently.
+    // If there was none on file, save the supplied email to the directory row.
+    if (!onFileEmail && suppliedEmail) {
+      await supabase.supabase
+        .from("profiles")
+        .update({ email: suppliedEmail })
+        .eq("id", p.id);
+    }
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://www.stgeorgecocnashville.org";
+    const emailRedirectTo = `${frontendUrl}/deaconsSchoolRegister?claim=1`;
+
+    const hasLogin = await profileHasLogin(p.id);
+
+    // shouldCreateUser:true safely signs into an existing account if the email
+    // is already in use (e.g. a shared family email), otherwise creates one.
+    const otpOptions = hasLogin
+      ? { shouldCreateUser: false, emailRedirectTo }
+      : {
+          shouldCreateUser: true,
+          emailRedirectTo,
+          data: {
+            portal_id: p.portal_id,
+            first_name: p.first_name,
+            last_name: p.last_name,
+            dob: p.dob,
+            cellphone: p.cellphone,
+            family_id: p.family_id,
+            family_role: p.family_role,
+            // Consumed by /login/ds/claim-profile to adopt this directory row.
+            ds_claim_portal_id: p.portal_id,
+          },
+        };
+
+    const { error: otpError } = await supabase.supabase.auth.signInWithOtp({
+      email: targetEmail,
+      options: otpOptions,
+    });
+
+    if (otpError) {
+      console.error("send magic link error:", otpError);
+      return res.status(400).json({
+        success: false,
+        message: "Could not send the sign-in link. Please try again.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Sign-in link sent.",
+      emailHint: maskEmail(targetEmail),
+    });
+  } catch (err) {
+    console.error("send magic link error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Could not send the sign-in link." });
+  }
+});
+
+/**
+ * Step 3 — Reconcile a freshly signed-in user with their directory record.
+ * Called by the frontend when it detects `?claim=1` after a magic-link login.
+ * Idempotent. Never deletes rows or changes a primary key (inbound FKs to
+ * profiles.id are unknown): it makes the auth-linked profile carry the correct
+ * portal_id and releases that portal_id from the old login-less directory row.
+ */
+app.post("/login/ds/claim-profile", authenticateToken, async (req, res) => {
+  try {
+    const authId = req.user.id;
+    const claimPortalId =
+      req.user.user_metadata?.ds_claim_portal_id ||
+      req.user.user_metadata?.portal_id ||
+      null;
+
+    if (!claimPortalId) {
+      // Signed into an existing (e.g. family) account — nothing to adopt.
+      return res.json({ success: true, claimed: false });
+    }
+
+    // The login-less directory record we intend to adopt.
+    const { data: dirRows } = await supabase.supabase
+      .from("profiles")
+      .select("*")
+      .eq("portal_id", claimPortalId);
+    const directoryProfile = (dirRows || []).find((r) => r.id !== authId) || null;
+    const alreadyOwned = (dirRows || []).some((r) => r.id === authId);
+
+    if (alreadyOwned || !directoryProfile) {
+      // Either we already own this portal_id, or there's nothing to adopt.
+      return res.json({ success: true, claimed: alreadyOwned });
+    }
+
+    const identity = {
+      portal_id: directoryProfile.portal_id,
+      first_name: directoryProfile.first_name,
+      last_name: directoryProfile.last_name,
+      dob: directoryProfile.dob,
+      cellphone: directoryProfile.cellphone,
+      family_id: directoryProfile.family_id,
+      family_role: directoryProfile.family_role,
+      grade_level: directoryProfile.grade_level,
+      gender: directoryProfile.gender,
+    };
+
+    // Release the portal_id from the old row first so the unique identity moves
+    // cleanly to the auth-linked profile.
+    await supabase.supabase
+      .from("profiles")
+      .update({ portal_id: null })
+      .eq("id", directoryProfile.id);
+
+    // Does the trigger already have a profile for this auth user?
+    const { data: authRows } = await supabase.supabase
+      .from("profiles")
+      .select("id, email")
+      .eq("id", authId);
+
+    if (authRows && authRows.length > 0) {
+      await supabase.supabase.from("profiles").update(identity).eq("id", authId);
+    } else {
+      await supabase.supabase
+        .from("profiles")
+        .insert([{ id: authId, email: req.user.email, ...identity }]);
+    }
+
+    return res.json({ success: true, claimed: true, portal_id: claimPortalId });
+  } catch (err) {
+    console.error("claim profile error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Could not link your account." });
+  }
+});
+
 /**
  * Login endpoint
  */
