@@ -3145,123 +3145,139 @@ app.post("/unenrollStudent", async (req, res) => {
 // the current (registration-open) academic year, based on their most recent
 // prior enrollment, final grade, and profile gender/grade_level. Does NOT
 // enroll anyone — the student still submits the registration form themselves.
+// ── Shared: compute the next-year course a student qualifies for ──────────────
+// Single source of truth for promotion. Used by the suggestion endpoint, the
+// priest roster, and the priest manual (cash/waived) enrollment so a student is
+// always placed in exactly the course they qualified for. Returns
+//   { ok, status, error?, data }
+// where status is HTTP-ish (200/404/500) and data mirrors the old endpoint shape.
+async function computeSuggestedNextCourse(portalId) {
+  const { data: profile, error: profileErr } = await supabase.supabase
+    .from("profiles")
+    .select("portal_id, gender, grade_level")
+    .eq("portal_id", portalId)
+    .single();
+  if (profileErr || !profile) {
+    return { ok: false, status: 404, error: "Student profile not found" };
+  }
+
+  // The class the student most recently completed — their latest active
+  // enrollment, whichever academic year that happens to be.
+  const { data: recentEnrollments, error: enrollErr } = await supabase.supabase
+    .from("ds_student_enrollment")
+    .select(
+      `enrollment_id, student_id, course_id, academic_year, enrolled_date, is_active,
+       ds_courses:course_id ( course_id, class_name, level, academic_year )`,
+    )
+    .eq("student_id", portalId)
+    .eq("is_active", true)
+    .order("enrolled_date", { ascending: false })
+    .limit(1);
+  if (enrollErr) {
+    return { ok: false, status: 500, error: enrollErr.message };
+  }
+
+  const previous = recentEnrollments && recentEnrollments[0];
+  if (!previous || !previous.ds_courses) {
+    return {
+      ok: true,
+      status: 200,
+      data: { suggested_course_id: null, reason: "new_student" },
+    };
+  }
+  const completedYear =
+    previous.ds_courses.academic_year || previous.academic_year || "";
+
+  // The "upcoming" year is the next academic year after the one just completed.
+  // year_label is a fixed "YYYY-YYYY" format, so a plain string comparison
+  // orders the years correctly.
+  const { data: allYears } = await supabase.supabase
+    .from("ds_academic_years")
+    .select("year_label");
+  const upcomingYear = (allYears || [])
+    .map((y) => y.year_label)
+    .filter((label) => label > completedYear)
+    .sort()[0];
+
+  // Final grade for the completed course (drives pass/fail promotion).
+  const { data: grade } = await supabase.supabase
+    .from("ds_student_final_grades")
+    .select("is_passing_year, weighted_percentage")
+    .eq("student_id", portalId)
+    .eq("course_id", previous.course_id)
+    .maybeSingle();
+
+  const baseData = {
+    previous_class_name: previous.ds_courses.class_name,
+    previous_course_id: previous.course_id,
+    previous_academic_year: completedYear,
+    upcoming_academic_year: upcomingYear || null,
+    is_passing_year: grade?.is_passing_year ?? null,
+    final_grade: grade?.weighted_percentage ?? null,
+  };
+
+  if (!upcomingYear) {
+    return {
+      ok: true,
+      status: 200,
+      data: { ...baseData, suggested_course_id: null, reason: "no_upcoming_year" },
+    };
+  }
+
+  const bracket = classifyCourse(previous.ds_courses);
+  if (bracket === "graduates") {
+    return {
+      ok: true,
+      status: 200,
+      data: { ...baseData, suggested_course_id: null, reason: "graduated" },
+    };
+  }
+
+  const decision = decideNextBracket({
+    bracket,
+    gender: profile.gender || "",
+    gradeLevel: profile.grade_level || "",
+    passed: !!grade?.is_passing_year,
+  });
+
+  if (!decision) {
+    return {
+      ok: true,
+      status: 200,
+      data: { ...baseData, suggested_course_id: null, reason: "no_suggestion" },
+    };
+  }
+
+  const { data: targetCourses, error: targetErr } = await supabase.supabase
+    .from("ds_courses")
+    .select("course_id, class_name, level, academic_year")
+    .eq("academic_year", upcomingYear)
+    .eq("is_active", true);
+  if (targetErr) {
+    return { ok: false, status: 500, error: targetErr.message };
+  }
+
+  const match = resolveCourse(targetCourses, decision);
+
+  return {
+    ok: true,
+    status: 200,
+    data: {
+      ...baseData,
+      suggested_course_id: match ? match.course_id : null,
+      suggested_class_name: match ? match.class_name : null,
+      reason: match ? (grade?.is_passing_year ? "promoted" : "repeated") : "no_match",
+    },
+  };
+}
+
 app.get("/suggestedNextCourse/:portalId", async (req, res) => {
   try {
-    const { portalId } = req.params;
-
-    const { data: profile, error: profileErr } = await supabase.supabase
-      .from("profiles")
-      .select("portal_id, gender, grade_level")
-      .eq("portal_id", portalId)
-      .single();
-    if (profileErr || !profile) {
-      return res
-        .status(404)
-        .json({ success: false, error: "Student profile not found" });
+    const result = await computeSuggestedNextCourse(req.params.portalId);
+    if (!result.ok) {
+      return res.status(result.status).json({ success: false, error: result.error });
     }
-
-    // The class the student most recently completed — their latest active
-    // enrollment, whichever academic year that happens to be.
-    const { data: recentEnrollments, error: enrollErr } = await supabase.supabase
-      .from("ds_student_enrollment")
-      .select(
-        `enrollment_id, student_id, course_id, academic_year, enrolled_date, is_active,
-         ds_courses:course_id ( course_id, class_name, level, academic_year )`,
-      )
-      .eq("student_id", portalId)
-      .eq("is_active", true)
-      .order("enrolled_date", { ascending: false })
-      .limit(1);
-    if (enrollErr) {
-      return res.status(500).json({ success: false, error: enrollErr.message });
-    }
-
-    const previous = recentEnrollments && recentEnrollments[0];
-    if (!previous || !previous.ds_courses) {
-      return res.json({
-        success: true,
-        data: { suggested_course_id: null, reason: "new_student" },
-      });
-    }
-    const completedYear =
-      previous.ds_courses.academic_year || previous.academic_year || "";
-
-    // The "upcoming" year is the next academic year after the one just
-    // completed. year_label is a fixed "YYYY-YYYY" format, so a plain string
-    // comparison orders the years correctly.
-    const { data: allYears } = await supabase.supabase
-      .from("ds_academic_years")
-      .select("year_label");
-    const upcomingYear = (allYears || [])
-      .map((y) => y.year_label)
-      .filter((label) => label > completedYear)
-      .sort()[0];
-
-    // Final grade for the completed course (drives pass/fail promotion).
-    const { data: grade } = await supabase.supabase
-      .from("ds_student_final_grades")
-      .select("is_passing_year, weighted_percentage")
-      .eq("student_id", portalId)
-      .eq("course_id", previous.course_id)
-      .maybeSingle();
-
-    const baseData = {
-      previous_class_name: previous.ds_courses.class_name,
-      previous_academic_year: completedYear,
-      upcoming_academic_year: upcomingYear || null,
-      is_passing_year: grade?.is_passing_year ?? null,
-      final_grade: grade?.weighted_percentage ?? null,
-    };
-
-    if (!upcomingYear) {
-      return res.json({
-        success: true,
-        data: { ...baseData, suggested_course_id: null, reason: "no_upcoming_year" },
-      });
-    }
-
-    const bracket = classifyCourse(previous.ds_courses);
-    if (bracket === "graduates") {
-      return res.json({
-        success: true,
-        data: { ...baseData, suggested_course_id: null, reason: "graduated" },
-      });
-    }
-
-    const decision = decideNextBracket({
-      bracket,
-      gender: profile.gender || "",
-      gradeLevel: profile.grade_level || "",
-      passed: !!grade?.is_passing_year,
-    });
-
-    if (!decision) {
-      return res.json({
-        success: true,
-        data: { ...baseData, suggested_course_id: null, reason: "no_suggestion" },
-      });
-    }
-
-    const { data: targetCourses, error: targetErr } = await supabase.supabase
-      .from("ds_courses")
-      .select("course_id, class_name, level, academic_year")
-      .eq("academic_year", upcomingYear)
-      .eq("is_active", true);
-    if (targetErr) {
-      return res.status(500).json({ success: false, error: targetErr.message });
-    }
-
-    const match = resolveCourse(targetCourses, decision);
-
-    return res.json({
-      success: true,
-      data: {
-        ...baseData,
-        suggested_course_id: match ? match.course_id : null,
-        suggested_class_name: match ? match.class_name : null,
-        reason: match ? (grade?.is_passing_year ? "promoted" : "repeated") : "no_match",
-      },
-    });
+    return res.json({ success: true, data: result.data });
   } catch (err) {
     console.error("suggestedNextCourse error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
@@ -3447,12 +3463,22 @@ app.post("/selfEnroll", authenticateToken, async (req, res) => {
       .eq("is_active", false)
       .maybeSingle();
 
+    // Card payment details recorded on the enrollment so it's distinguishable
+    // from cash/waived enrollments entered by a priest.
+    const cardPayment = {
+      payment_method: "card",
+      payment_reference: payment_intent_id,
+      payment_amount_cents: REENROLLMENT_FEE_CENTS,
+      paid_at: new Date().toISOString(),
+    };
+
     if (existingInactive) {
       const { data, error } = await supabase.supabase
         .from("ds_student_enrollment")
         .update({
           is_active: true,
           enrolled_date: new Date().toISOString().split("T")[0],
+          ...cardPayment,
         })
         .eq("enrollment_id", existingInactive.enrollment_id)
         .select()
@@ -3478,6 +3504,7 @@ app.post("/selfEnroll", authenticateToken, async (req, res) => {
           enrolled_date: new Date().toISOString().split("T")[0],
           is_active: true,
           role: "deacon_school_student",
+          ...cardPayment,
         },
       ])
       .select()
@@ -4309,6 +4336,561 @@ app.post("/reenrollment/bulk", async (req, res) => {
     });
   } catch (err) {
     console.error("reenrollment bulk error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// ─── PRIEST: Register last-year members for next year ──────────────────────────
+// A priest-facing flow to bring last year's members back for the upcoming year:
+// search the roster, set a missing email, email a magic sign-in link that opens
+// the register+pay page, or enroll directly (cash / fee-waived). Every path
+// places the student in the course they QUALIFIED for (promotion rules).
+
+// Does this profile row have a Supabase auth login? (profile.id === auth user id
+// for real logins; login-less directory rows have a random id.)
+async function dsProfileHasLogin(profileId) {
+  try {
+    const { data, error } =
+      await supabase.supabase.auth.admin.getUserById(profileId);
+    return !error && !!data?.user;
+  } catch {
+    return false;
+  }
+}
+
+// Is there any account (login) that owns this email? Used to decide whether a
+// "parent/family email" link can sign into an existing account.
+async function dsEmailHasLogin(email) {
+  const { data: rows } = await supabase.supabase
+    .from("profiles")
+    .select("id, email")
+    .ilike("email", email);
+  for (const r of rows || []) {
+    if (await dsProfileHasLogin(r.id)) return true;
+  }
+  return false;
+}
+
+function dsMaskEmail(email) {
+  if (!email || typeof email !== "string" || !email.includes("@")) return null;
+  const [local, domain] = email.split("@");
+  return `${local.slice(0, 1)}•••@${domain}`;
+}
+
+// GET roster of members enrolled in :academicYear, augmented with the course
+// each qualifies for next year and whether they've already registered for it.
+// GET is not caught by the mutation guard, so authorize explicitly.
+app.get(
+  "/registration/lastYearRoster/:academicYear",
+  authenticateToken,
+  requireDeaconsSchoolWrite,
+  async (req, res) => {
+    try {
+      const { academicYear } = req.params;
+      const search = (req.query.search || "").trim().toLowerCase();
+
+      // Members who were actively enrolled in the source year.
+      const { data: enrollments, error: enrollErr } = await supabase.supabase
+        .from("ds_student_enrollment")
+        .select(
+          `student_id, course_id, ds_courses:course_id (course_id, class_name, level)`,
+        )
+        .eq("academic_year", academicYear)
+        .eq("is_active", true);
+      if (enrollErr)
+        return res.status(500).json({ success: false, error: enrollErr.message });
+
+      const studentIds = [
+        ...new Set((enrollments || []).map((e) => e.student_id)),
+      ];
+      if (studentIds.length === 0)
+        return res.json({ success: true, data: [], upcoming_academic_year: null });
+
+      // Batch-load everything the promotion decision needs, then compute in
+      // memory (the promotion helpers are pure functions).
+      const [{ data: profiles }, { data: finalGrades }, { data: allYears }] =
+        await Promise.all([
+          supabase.supabase
+            .from("profiles")
+            .select("portal_id, first_name, last_name, email, gender, grade_level")
+            .in("portal_id", studentIds),
+          supabase.supabase
+            .from("ds_student_final_grades")
+            .select("student_id, course_id, weighted_percentage, is_passing_year")
+            .eq("academic_year", academicYear),
+          supabase.supabase.from("ds_academic_years").select("year_label"),
+        ]);
+
+      const upcomingYear = (allYears || [])
+        .map((y) => y.year_label)
+        .filter((label) => label > academicYear)
+        .sort()[0] || null;
+
+      // Upcoming-year courses (to resolve the qualified course) and existing
+      // upcoming enrollments (to mark who already registered + how they paid).
+      let upcomingCourses = [];
+      let upcomingEnrollments = [];
+      if (upcomingYear) {
+        const [{ data: uc }, { data: ue }] = await Promise.all([
+          supabase.supabase
+            .from("ds_courses")
+            .select("course_id, class_name, level, academic_year")
+            .eq("academic_year", upcomingYear)
+            .eq("is_active", true),
+          supabase.supabase
+            .from("ds_student_enrollment")
+            .select(
+              `student_id, is_active, payment_method, ds_courses:course_id (class_name)`,
+            )
+            .eq("academic_year", upcomingYear)
+            .eq("is_active", true),
+        ]);
+        upcomingCourses = uc || [];
+        upcomingEnrollments = ue || [];
+      }
+
+      const profileMap = {};
+      (profiles || []).forEach((p) => (profileMap[p.portal_id] = p));
+      const gradeMap = {};
+      (finalGrades || []).forEach(
+        (g) => (gradeMap[`${g.student_id}__${g.course_id}`] = g),
+      );
+      const upcomingMap = {};
+      (upcomingEnrollments || []).forEach(
+        (e) => (upcomingMap[e.student_id] = e),
+      );
+
+      const rows = (enrollments || []).map((e) => {
+        const profile = profileMap[e.student_id] || {};
+        const grade = gradeMap[`${e.student_id}__${e.course_id}`] || null;
+        const passed = !!grade?.is_passing_year;
+
+        // Resolve the qualified next-year course from the promotion rules.
+        let suggested = { course_id: null, class_name: null, reason: "no_upcoming_year" };
+        if (upcomingYear && e.ds_courses) {
+          const bracket = classifyCourse(e.ds_courses);
+          if (bracket === "graduates") {
+            suggested = { course_id: null, class_name: null, reason: "graduated" };
+          } else {
+            const decision = decideNextBracket({
+              bracket,
+              gender: profile.gender || "",
+              gradeLevel: profile.grade_level || "",
+              passed,
+            });
+            const match = decision ? resolveCourse(upcomingCourses, decision) : null;
+            suggested = {
+              course_id: match ? match.course_id : null,
+              class_name: match ? match.class_name : null,
+              reason: match ? (passed ? "promoted" : "repeated") : "no_match",
+            };
+          }
+        }
+
+        const already = upcomingMap[e.student_id] || null;
+
+        return {
+          student_id: e.student_id,
+          first_name: profile.first_name || "",
+          last_name: profile.last_name || "",
+          email: profile.email || "",
+          has_email: !!profile.email,
+          current_class_name: e.ds_courses?.class_name || "",
+          weighted_percentage: grade?.weighted_percentage ?? null,
+          is_passing_year: grade?.is_passing_year ?? null,
+          suggested_course_id: suggested.course_id,
+          suggested_class_name: suggested.class_name,
+          suggested_reason: suggested.reason,
+          already_registered: !!already,
+          registered_class_name: already?.ds_courses?.class_name || null,
+          registered_payment_method: already?.payment_method || null,
+        };
+      });
+
+      const filtered = search
+        ? rows.filter((r) =>
+            `${r.first_name} ${r.last_name} ${r.email}`
+              .toLowerCase()
+              .includes(search),
+          )
+        : rows;
+
+      filtered.sort((a, b) =>
+        `${a.last_name} ${a.first_name}`.localeCompare(
+          `${b.last_name} ${b.first_name}`,
+        ),
+      );
+
+      res.json({
+        success: true,
+        data: filtered,
+        upcoming_academic_year: upcomingYear,
+      });
+    } catch (err) {
+      console.error("lastYearRoster error:", err);
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  },
+);
+
+// POST set/update a member's contact email (priest only → auto-guarded).
+// Also updates the auth login's email when the profile already has one.
+app.post("/registration/set-email", async (req, res) => {
+  try {
+    const { portal_id, email } = req.body || {};
+    if (!portal_id || !email) {
+      return res
+        .status(400)
+        .json({ success: false, error: "portal_id and email are required" });
+    }
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    const normalized = String(email).toLowerCase().trim();
+    if (!emailRegex.test(normalized)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Please provide a valid email address" });
+    }
+
+    const { data: profile, error: profErr } = await supabase.supabase
+      .from("profiles")
+      .select("id, portal_id")
+      .eq("portal_id", portal_id)
+      .maybeSingle();
+    if (profErr)
+      return res.status(500).json({ success: false, error: profErr.message });
+    if (!profile)
+      return res
+        .status(404)
+        .json({ success: false, error: "No profile with that portal_id" });
+
+    const { error: updErr } = await supabase.supabase
+      .from("profiles")
+      .update({ email: normalized })
+      .eq("portal_id", portal_id);
+    if (updErr)
+      return res.status(500).json({ success: false, error: updErr.message });
+
+    // Keep the auth login's email in sync if this profile has one.
+    if (await dsProfileHasLogin(profile.id)) {
+      await supabase.supabase.auth.admin
+        .updateUserById(profile.id, { email: normalized })
+        .catch((e) => console.warn("auth email sync failed:", e?.message));
+    }
+
+    res.json({ success: true, email: normalized });
+  } catch (err) {
+    console.error("set-email error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// POST email a registration magic link (priest only → auto-guarded).
+// Body: { portal_id, email?, email_is_family? }
+//   email          – optional; defaults to the address on file
+//   email_is_family– true when sending to a parent's shared email. In that case
+//                    we sign into the parent's EXISTING login (no student claim
+//                    metadata) so the register page's family picker enrolls the
+//                    child; we never overwrite the student's identity.
+app.post("/registration/send-link", async (req, res) => {
+  try {
+    const { portal_id, email, email_is_family } = req.body || {};
+    if (!portal_id) {
+      return res
+        .status(400)
+        .json({ success: false, error: "portal_id is required" });
+    }
+
+    const { data: profile, error: profErr } = await supabase.supabase
+      .from("profiles")
+      .select("id, portal_id, first_name, last_name, dob, cellphone, family_id, family_role, email")
+      .eq("portal_id", portal_id)
+      .maybeSingle();
+    if (profErr)
+      return res.status(500).json({ success: false, error: profErr.message });
+    if (!profile)
+      return res
+        .status(404)
+        .json({ success: false, error: "No profile with that portal_id" });
+
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    const supplied = (email || "").toLowerCase().trim();
+    if (supplied && !emailRegex.test(supplied)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Please provide a valid email address" });
+    }
+    const targetEmail = supplied || (profile.email || "").toLowerCase().trim();
+    if (!targetEmail) {
+      return res.status(400).json({
+        success: false,
+        error: "No email on file. Please provide an email address.",
+        needEmail: true,
+      });
+    }
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://www.stgeorgecocnashville.org";
+    const emailRedirectTo = `${frontendUrl}/deaconsSchoolRegister?claim=1`;
+
+    let otpOptions;
+    if (email_is_family) {
+      // Parent's shared email → must sign into an existing account. Do NOT
+      // create a bare account and do NOT attach the student's claim metadata.
+      const hasLogin = await dsEmailHasLogin(targetEmail);
+      if (!hasLogin) {
+        return res.status(409).json({
+          success: false,
+          error:
+            "No existing account uses that family email. Use the member's personal email instead, or have the parent create an account first.",
+          needPersonalEmail: true,
+        });
+      }
+      otpOptions = { shouldCreateUser: false, emailRedirectTo };
+    } else {
+      // Personal email → set it on the student's profile and sign into / create
+      // the student's own account, adopting their directory row on first login.
+      if (supplied && supplied !== (profile.email || "").toLowerCase().trim()) {
+        await supabase.supabase
+          .from("profiles")
+          .update({ email: supplied })
+          .eq("portal_id", portal_id);
+      }
+      const studentHasLogin = await dsProfileHasLogin(profile.id);
+      otpOptions = studentHasLogin
+        ? { shouldCreateUser: false, emailRedirectTo }
+        : {
+            shouldCreateUser: true,
+            emailRedirectTo,
+            data: {
+              portal_id: profile.portal_id,
+              first_name: profile.first_name,
+              last_name: profile.last_name,
+              dob: profile.dob,
+              cellphone: profile.cellphone,
+              family_id: profile.family_id,
+              family_role: profile.family_role,
+              ds_claim_portal_id: profile.portal_id,
+            },
+          };
+    }
+
+    const { error: otpError } = await supabase.supabase.auth.signInWithOtp({
+      email: targetEmail,
+      options: otpOptions,
+    });
+    if (otpError) {
+      console.error("send-link otp error:", otpError);
+      return res.status(400).json({
+        success: false,
+        error: "Could not send the sign-in link. Please try again.",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Sign-in link sent.",
+      emailHint: dsMaskEmail(targetEmail),
+    });
+  } catch (err) {
+    console.error("send-link error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// POST enroll a member directly for next year, paid by cash or fee-waived
+// (priest only → auto-guarded). Always enrolls into the course the student
+// QUALIFIED for (promotion rules); an explicit course_id may override only when
+// no qualified course could be resolved (e.g. brand-new student).
+app.post("/registration/enroll-manual", async (req, res) => {
+  try {
+    const {
+      student_id,
+      payment_method,
+      amount_cents,
+      course_id: overrideCourseId,
+      payment_intent_id,
+    } = req.body || {};
+
+    if (!student_id) {
+      return res
+        .status(400)
+        .json({ success: false, error: "student_id is required" });
+    }
+    if (!["cash", "waived", "card"].includes(payment_method)) {
+      return res.status(400).json({
+        success: false,
+        error: "payment_method must be 'cash', 'card', or 'waived'",
+      });
+    }
+
+    // For an in-person card payment, verify the Stripe PaymentIntent succeeded
+    // for this student before recording anything.
+    if (payment_method === "card") {
+      const stripe = getStripeClient();
+      if (!stripe) {
+        return res.status(503).json({
+          success: false,
+          error: "Stripe is not configured on the server",
+        });
+      }
+      if (!payment_intent_id) {
+        return res.status(402).json({
+          success: false,
+          error: "Card payment is required before enrolling",
+        });
+      }
+      let pi;
+      try {
+        pi = await stripe.paymentIntents.retrieve(payment_intent_id);
+      } catch (e) {
+        return res
+          .status(402)
+          .json({ success: false, error: "Could not verify the card payment." });
+      }
+      if (
+        !pi ||
+        pi.status !== "succeeded" ||
+        pi.amount !== REENROLLMENT_FEE_CENTS ||
+        pi.currency !== "usd" ||
+        pi.metadata?.purpose !== "ds_reenrollment" ||
+        String(pi.metadata?.student_id || "") !== String(student_id)
+      ) {
+        return res.status(402).json({
+          success: false,
+          error: "Card payment not completed or invalid.",
+        });
+      }
+    }
+
+    // Resolve the qualified next-year course.
+    const suggestion = await computeSuggestedNextCourse(student_id);
+    if (!suggestion.ok) {
+      return res
+        .status(suggestion.status)
+        .json({ success: false, error: suggestion.error });
+    }
+    const s = suggestion.data;
+    let course_id = s.suggested_course_id;
+
+    if (!course_id) {
+      // No qualified course could be resolved — require an explicit choice so we
+      // never guess. The frontend surfaces the reason (graduated / no_match / …).
+      if (!overrideCourseId) {
+        return res.status(422).json({
+          success: false,
+          error:
+            "Could not determine the course this member qualifies for. Select a course explicitly.",
+          reason: s.reason,
+          data: s,
+        });
+      }
+      course_id = overrideCourseId;
+    }
+
+    // Enroll into the academic year the chosen course belongs to.
+    const { data: course, error: courseErr } = await supabase.supabase
+      .from("ds_courses")
+      .select("academic_year, class_name")
+      .eq("course_id", course_id)
+      .single();
+    if (courseErr || !course) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Course not found" });
+    }
+    const academic_year = course.academic_year;
+    if (!academic_year) {
+      return res
+        .status(500)
+        .json({ success: false, error: "Course has no academic year" });
+    }
+
+    // Already actively enrolled anywhere this year? Stop.
+    const { data: existingActive } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id, course_id")
+      .eq("student_id", student_id)
+      .eq("academic_year", academic_year)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (existingActive) {
+      return res.status(409).json({
+        success: false,
+        error: "This member is already enrolled for that academic year",
+        existingEnrollment: existingActive,
+      });
+    }
+
+    const payment = {
+      payment_method,
+      payment_reference: payment_method === "card" ? payment_intent_id : null,
+      payment_amount_cents:
+        payment_method === "waived"
+          ? 0
+          : payment_method === "card"
+            ? REENROLLMENT_FEE_CENTS
+            : Number.isInteger(amount_cents)
+              ? amount_cents
+              : REENROLLMENT_FEE_CENTS,
+      paid_at: new Date().toISOString(),
+      recorded_by: req.authPortalId || null,
+    };
+
+    // Reactivate a prior inactive row for this exact course+year if present.
+    const { data: existingInactive } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id")
+      .eq("student_id", student_id)
+      .eq("course_id", course_id)
+      .eq("academic_year", academic_year)
+      .eq("is_active", false)
+      .maybeSingle();
+
+    if (existingInactive) {
+      const { data, error } = await supabase.supabase
+        .from("ds_student_enrollment")
+        .update({
+          is_active: true,
+          enrolled_date: new Date().toISOString().split("T")[0],
+          ...payment,
+        })
+        .eq("enrollment_id", existingInactive.enrollment_id)
+        .select()
+        .single();
+      if (error)
+        return res.status(500).json({ success: false, error: error.message });
+      return res.json({
+        success: true,
+        message: `Enrolled in ${course.class_name} (${payment_method})`,
+        data,
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .insert([
+        {
+          student_id,
+          course_id,
+          academic_year,
+          enrolled_date: new Date().toISOString().split("T")[0],
+          is_active: true,
+          role: "deacon_school_student",
+          ...payment,
+        },
+      ])
+      .select()
+      .single();
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+
+    res.json({
+      success: true,
+      message: `Enrolled in ${course.class_name} (${payment_method})`,
+      data,
+    });
+  } catch (err) {
+    console.error("enroll-manual error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });

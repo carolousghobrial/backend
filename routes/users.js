@@ -532,6 +532,142 @@ app.post("/login/ds/claim-profile", authenticateToken, async (req, res) => {
   }
 });
 
+// ==================== PASSWORDLESS (MAGIC LINK) LOGIN ====================
+
+/**
+ * Step 1 — Send a magic sign-in link to the given email.
+ * Passwordless login: the user enters only their email, we email a one-click
+ * link, and clicking it lands them on the frontend `/auth/callback` route with
+ * the session tokens in the URL hash (completed by /login/magic/complete).
+ *
+ * shouldCreateUser:false → only existing accounts receive a link. We always
+ * respond with a generic success so the endpoint can't be used to probe which
+ * emails have accounts (email-enumeration protection).
+ */
+app.post("/login/magic/send", rateLimitPasswordReset, async (req, res) => {
+  try {
+    const { email } = req.body || {};
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+    }
+
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid email address",
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://www.stgeorgecocnashville.org";
+    const emailRedirectTo = `${frontendUrl}/auth/callback`;
+
+    const { error } = await supabase.supabase.auth.signInWithOtp({
+      email: normalizedEmail,
+      options: {
+        shouldCreateUser: false,
+        emailRedirectTo,
+      },
+    });
+
+    // Swallow "user not found" / signup-disabled errors so we don't leak which
+    // emails exist. Surface only genuine rate-limit errors.
+    if (error) {
+      console.warn("Magic link send note:", error.message);
+      if ((error.message || "").toLowerCase().includes("rate limit")) {
+        return res.status(429).json({
+          success: false,
+          message: "Too many requests. Please wait a few minutes.",
+        });
+      }
+    }
+
+    console.log("Magic link sent (if account exists):", normalizedEmail);
+
+    return res.json({
+      success: true,
+      message:
+        "If an account with that email exists, we've sent a sign-in link. Please check your inbox.",
+      email: normalizedEmail,
+    });
+  } catch (error) {
+    console.error("Magic link send error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "An error occurred. Please try again later.",
+    });
+  }
+});
+
+/**
+ * Step 2 — Complete a magic-link sign-in.
+ * The frontend callback captures { access_token, refresh_token } from the URL
+ * hash after the user clicks the link, and posts them here. We validate the
+ * access token, load the profile, and return the same shape as /login so the
+ * client can store the session and keep the user logged in.
+ */
+app.post("/login/magic/complete", async (req, res) => {
+  try {
+    const { access_token, refresh_token } = req.body || {};
+
+    if (!access_token) {
+      return res.status(400).json({
+        success: false,
+        message: "Access token is required",
+      });
+    }
+
+    const {
+      data: { user },
+      error: getUserError,
+    } = await supabase.supabase.auth.getUser(access_token);
+
+    if (getUserError || !user) {
+      console.error("Magic link token validation failed:", getUserError);
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired sign-in link. Please request a new one.",
+      });
+    }
+
+    const { data: profile, error: profileError } = await supabase.supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", user.id)
+      .single();
+
+    if (profileError) {
+      console.error("Profile fetch error (magic link):", profileError);
+    }
+
+    console.log("Magic link sign-in successful for:", user.email);
+
+    return res.json({
+      success: true,
+      token: access_token,
+      refresh_token: refresh_token || null,
+      user: profile || {
+        id: user.id,
+        email: user.email,
+        ...user.user_metadata,
+      },
+    });
+  } catch (error) {
+    console.error("Magic link complete error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error during sign-in",
+    });
+  }
+});
+
 /**
  * Login endpoint
  */
