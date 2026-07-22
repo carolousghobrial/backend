@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS public.ds_registration_requests (
   linked_portal_id text,
   reviewed_by      text,
   reviewed_at      timestamptz,
+  -- Registrants pay the $25 fee up front; a coordinator enrolls them after.
+  payment_reference    text,
+  payment_amount_cents integer,
+  paid_at              timestamptz,
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 

@@ -83,6 +83,10 @@ const AUTH_EXEMPT_ROUTES = new Set([
   // exempt from the staff-only requireDeaconsSchoolWrite guard.
   "/createReenrollmentPaymentIntent",
   "/selfEnroll",
+  // New-registration flow is for logged-OUT first-time visitors: they pay the
+  // $25 fee and submit their info for a coordinator to connect + enroll. Both
+  // routes are public (no login) and verify the Stripe payment server-side.
+  "/createRegistrationPaymentIntent",
   "/registrationRequest",
 ]);
 
@@ -3325,6 +3329,39 @@ app.post("/createReenrollmentPaymentIntent", authenticateToken, async (req, res)
   }
 });
 
+// ── Create a Stripe PaymentIntent for the $25 NEW-registration fee ─────────────
+// Public (logged-out first-time visitors). The purpose tag lets /registrationRequest
+// verify this payment belongs to the new-registration flow before recording it.
+app.post("/createRegistrationPaymentIntent", async (req, res) => {
+  try {
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe is not configured on the server",
+      });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: REENROLLMENT_FEE_CENTS,
+      currency: "usd",
+      description: "Deacons School New Registration Fee",
+      metadata: { purpose: "ds_new_registration" },
+    });
+
+    return res.status(200).json({
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+    });
+  } catch (err) {
+    console.error("Error creating new-registration payment intent:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to initiate payment",
+    });
+  }
+});
+
 // ── Self-enrollment: student enrolls themselves for the current academic year ──
 app.post("/selfEnroll", authenticateToken, async (req, res) => {
   try {
@@ -3539,6 +3576,7 @@ app.post("/registrationRequest", async (req, res) => {
       email,
       previous_level,
       notes,
+      payment_intent_id,
     } = req.body || {};
 
     if (!first_name?.trim() || !last_name?.trim() || !dob) {
@@ -3554,6 +3592,59 @@ app.post("/registrationRequest", async (req, res) => {
       });
     }
 
+    // A successful $25 registration payment is required before we record the
+    // request. Verify it with Stripe so the amount/purpose can't be forged.
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe is not configured on the server",
+      });
+    }
+    if (!payment_intent_id) {
+      return res.status(402).json({
+        success: false,
+        error: "Payment is required to complete registration",
+      });
+    }
+    let paymentIntent;
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
+    } catch (e) {
+      return res.status(402).json({
+        success: false,
+        error: "Could not verify payment. Please try again.",
+      });
+    }
+    if (
+      !paymentIntent ||
+      paymentIntent.status !== "succeeded" ||
+      paymentIntent.amount !== REENROLLMENT_FEE_CENTS ||
+      paymentIntent.currency !== "usd" ||
+      paymentIntent.metadata?.purpose !== "ds_new_registration"
+    ) {
+      return res.status(402).json({
+        success: false,
+        error:
+          "Payment not completed or invalid. Please complete the $25 fee before submitting.",
+      });
+    }
+
+    // Guard against a double-submit reusing the same payment.
+    const { data: existing } = await supabase.supabase
+      .from("ds_registration_requests")
+      .select("id")
+      .eq("payment_reference", paymentIntent.id)
+      .maybeSingle();
+    if (existing) {
+      return res.json({
+        success: true,
+        message:
+          "Thanks! We already received your information and will connect your account shortly.",
+        data: existing,
+      });
+    }
+
     const { data, error } = await supabase.supabase
       .from("ds_registration_requests")
       .insert([
@@ -3566,6 +3657,9 @@ app.post("/registrationRequest", async (req, res) => {
           previous_level: previous_level?.trim() || null,
           notes: notes?.trim() || null,
           status: "pending",
+          payment_reference: paymentIntent.id,
+          payment_amount_cents: paymentIntent.amount,
+          paid_at: new Date().toISOString(),
         },
       ])
       .select()
