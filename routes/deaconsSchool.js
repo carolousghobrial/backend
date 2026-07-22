@@ -77,6 +77,11 @@ const AUTH_EXEMPT_ROUTES = new Set([
   "/newYear/setupCourses",
   "/enrollStudent",
   "/unenrollStudent",
+  // Self-service re-enrollment: families (who have no DS-write role) must be
+  // able to start their own $25 payment and enroll. Both routes authenticate
+  // the user inline and verify family ownership before enrolling, so they are
+  // exempt from the staff-only requireDeaconsSchoolWrite guard.
+  "/createReenrollmentPaymentIntent",
   "/selfEnroll",
   "/registrationRequest",
 ]);
