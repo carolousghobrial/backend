@@ -1490,19 +1490,34 @@ app.post("/logout", authenticateToken, async (req, res) => {
  */
 app.get("/getUsers", async (req, res) => {
   try {
-    const { data, error } = await supabase.supabase
-      .from("profiles")
-      .select("*")
-      .order("portal_id", { ascending: false });
+    // PostgREST caps a single response at 1000 rows regardless of the requested
+    // range, so a plain select() silently drops everyone past that — callers get
+    // a truncated directory with no error. Page through instead.
+    const PAGE_SIZE = 1000;
+    const MAX_PAGES = 25; // safety bound so a bad response can't loop forever
+    const profiles = [];
 
-    if (error) {
-      return res.status(500).json({
-        success: false,
-        message: error.message,
-      });
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const offset = page * PAGE_SIZE;
+      const { data, error } = await supabase.supabase
+        .from("profiles")
+        .select("*")
+        .order("portal_id", { ascending: false })
+        .range(offset, offset + PAGE_SIZE - 1);
+
+      if (error) {
+        return res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
+
+      if (!data || data.length === 0) break;
+      profiles.push(...data);
+      if (data.length < PAGE_SIZE) break;
     }
 
-    res.send(data);
+    res.send(profiles);
   } catch (error) {
     console.error("Get users error:", error);
     res.status(500).json({

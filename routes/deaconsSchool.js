@@ -5,6 +5,7 @@ const multer = require("multer");
 const path = require("path");
 
 const fs = require("fs");
+const crypto = require("crypto");
 const supabase = require("../config/config");
 const {
   authenticateToken,
@@ -3719,31 +3720,186 @@ app.get(
   },
 );
 
-// Admin: link a request to a portal profile (mutation → auto-guarded).
+// Admin: link a request to a portal profile (creating one if it's a
+// genuinely new person) AND enroll them into a course in one step
+// (mutation → auto-guarded). The $25 fee already collected on the request
+// is carried over onto the enrollment — no second charge.
 app.post("/registrationRequests/:id/link", async (req, res) => {
   try {
     const { id } = req.params;
-    const { portal_id } = req.body || {};
-    if (!portal_id) {
-      return res
-        .status(400)
-        .json({ success: false, error: "portal_id is required" });
-    }
+    const { portal_id: bodyPortalId, newProfile, course_id: overrideCourseId } =
+      req.body || {};
 
-    // Make sure the portal profile actually exists.
-    const { data: profile, error: profErr } = await supabase.supabase
-      .from("profiles")
-      .select("portal_id")
-      .eq("portal_id", portal_id)
+    const { data: request, error: reqErr } = await supabase.supabase
+      .from("ds_registration_requests")
+      .select("*")
+      .eq("id", id)
       .maybeSingle();
-    if (profErr)
-      return res.status(500).json({ success: false, error: profErr.message });
-    if (!profile)
+    if (reqErr)
+      return res.status(500).json({ success: false, error: reqErr.message });
+    if (!request)
       return res
         .status(404)
-        .json({ success: false, error: "No profile with that portal_id" });
+        .json({ success: false, error: "Registration request not found" });
+    if (request.status !== "pending") {
+      return res.status(409).json({
+        success: false,
+        error: `Request has already been ${request.status}`,
+      });
+    }
 
-    const { data, error } = await supabase.supabase
+    let portal_id = bodyPortalId || null;
+
+    if (!portal_id && newProfile) {
+      portal_id = `LOCAL-${crypto.randomUUID()}`;
+      const { error: createErr } = await supabase.supabase
+        .from("profiles")
+        .insert([
+          {
+            portal_id,
+            first_name: (newProfile.first_name || request.first_name || "").trim(),
+            last_name: (newProfile.last_name || request.last_name || "").trim(),
+            dob: newProfile.dob || request.dob,
+            cellphone: newProfile.cellphone || request.cellphone || null,
+            email: (newProfile.email || request.email || null)?.toLowerCase?.() ||
+              newProfile.email ||
+              request.email ||
+              null,
+          },
+        ]);
+      if (createErr)
+        return res.status(500).json({ success: false, error: createErr.message });
+    } else if (!portal_id) {
+      return res.status(400).json({
+        success: false,
+        error: "portal_id or newProfile is required",
+      });
+    } else {
+      // Make sure the given portal profile actually exists.
+      const { data: profile, error: profErr } = await supabase.supabase
+        .from("profiles")
+        .select("portal_id")
+        .eq("portal_id", portal_id)
+        .maybeSingle();
+      if (profErr)
+        return res.status(500).json({ success: false, error: profErr.message });
+      if (!profile)
+        return res
+          .status(404)
+          .json({ success: false, error: "No profile with that portal_id" });
+    }
+
+    // Resolve the course to enroll into.
+    const suggestion = await computeSuggestedNextCourse(portal_id);
+    if (!suggestion.ok) {
+      return res
+        .status(suggestion.status)
+        .json({ success: false, error: suggestion.error });
+    }
+    const s = suggestion.data;
+    let course_id = s.suggested_course_id;
+    if (!course_id) {
+      if (!overrideCourseId) {
+        return res.status(422).json({
+          success: false,
+          error:
+            "Could not determine the course this member qualifies for. Select a course explicitly.",
+          reason: s.reason,
+          portal_id,
+          data: s,
+        });
+      }
+      course_id = overrideCourseId;
+    }
+
+    const { data: course, error: courseErr } = await supabase.supabase
+      .from("ds_courses")
+      .select("academic_year, class_name")
+      .eq("course_id", course_id)
+      .single();
+    if (courseErr || !course) {
+      return res.status(404).json({ success: false, error: "Course not found" });
+    }
+    const academic_year = course.academic_year;
+    if (!academic_year) {
+      return res
+        .status(500)
+        .json({ success: false, error: "Course has no academic year" });
+    }
+
+    // Already actively enrolled anywhere this year? Stop.
+    const { data: existingActive } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id, course_id")
+      .eq("student_id", portal_id)
+      .eq("academic_year", academic_year)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (existingActive) {
+      return res.status(409).json({
+        success: false,
+        error: "This member is already enrolled for that academic year",
+        existingEnrollment: existingActive,
+      });
+    }
+
+    // The $25 fee was already verified and collected when the request was
+    // submitted (POST /registrationRequest) — carry it over as-is.
+    const payment = {
+      payment_method: "card",
+      payment_reference: request.payment_reference,
+      payment_amount_cents: request.payment_amount_cents,
+      paid_at: request.paid_at,
+      recorded_by: req.authPortalId || null,
+    };
+
+    // Reactivate a prior inactive row for this exact course+year if present.
+    const { data: existingInactive } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id")
+      .eq("student_id", portal_id)
+      .eq("course_id", course_id)
+      .eq("academic_year", academic_year)
+      .eq("is_active", false)
+      .maybeSingle();
+
+    let enrollment;
+    if (existingInactive) {
+      const { data, error } = await supabase.supabase
+        .from("ds_student_enrollment")
+        .update({
+          is_active: true,
+          enrolled_date: new Date().toISOString().split("T")[0],
+          ...payment,
+        })
+        .eq("enrollment_id", existingInactive.enrollment_id)
+        .select()
+        .single();
+      if (error)
+        return res.status(500).json({ success: false, error: error.message });
+      enrollment = data;
+    } else {
+      const { data, error } = await supabase.supabase
+        .from("ds_student_enrollment")
+        .insert([
+          {
+            student_id: portal_id,
+            course_id,
+            academic_year,
+            enrolled_date: new Date().toISOString().split("T")[0],
+            is_active: true,
+            role: "deacon_school_student",
+            ...payment,
+          },
+        ])
+        .select()
+        .single();
+      if (error)
+        return res.status(500).json({ success: false, error: error.message });
+      enrollment = data;
+    }
+
+    const { data: updatedRequest, error: updateErr } = await supabase.supabase
       .from("ds_registration_requests")
       .update({
         status: "linked",
@@ -3754,10 +3910,14 @@ app.post("/registrationRequests/:id/link", async (req, res) => {
       .eq("id", id)
       .select()
       .single();
+    if (updateErr)
+      return res.status(500).json({ success: false, error: updateErr.message });
 
-    if (error)
-      return res.status(500).json({ success: false, error: error.message });
-    res.json({ success: true, data });
+    res.json({
+      success: true,
+      message: `Linked and enrolled in ${course.class_name}`,
+      data: { request: updatedRequest, enrollment },
+    });
   } catch (err) {
     console.error("link registrationRequest error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
@@ -4296,10 +4456,18 @@ app.get("/reenrollment/candidates/:academicYear", async (req, res) => {
     if (enrollErr)
       return res.status(500).json({ success: false, error: enrollErr.message });
 
-    const { data: finalGrades } = await supabase.supabase
+    const { data: finalGrades, error: gradesErr } = await supabase.supabase
       .from("ds_student_final_grades")
       .select("student_id, course_id, weighted_percentage, is_passing_year")
       .eq("academic_year", academicYear);
+    if (gradesErr) {
+      // A silently-swallowed error here previously made every student look
+      // ungraded and defaulted them all to "repeat" — fail loudly instead.
+      console.error("reenrollment/candidates grades query failed:", gradesErr);
+      return res
+        .status(500)
+        .json({ success: false, error: gradesErr.message });
+    }
 
     const gradeMap = {};
     (finalGrades || []).forEach((g) => {
@@ -4507,18 +4675,29 @@ app.get(
 
       // Batch-load everything the promotion decision needs, then compute in
       // memory (the promotion helpers are pure functions).
-      const [{ data: profiles }, { data: finalGrades }, { data: allYears }] =
-        await Promise.all([
-          supabase.supabase
-            .from("profiles")
-            .select("portal_id, first_name, last_name, email, gender, grade_level")
-            .in("portal_id", studentIds),
-          supabase.supabase
-            .from("ds_student_final_grades")
-            .select("student_id, course_id, weighted_percentage, is_passing_year")
-            .eq("academic_year", academicYear),
-          supabase.supabase.from("ds_academic_years").select("year_label"),
-        ]);
+      const [
+        { data: profiles },
+        { data: finalGrades, error: gradesErr },
+        { data: allYears },
+      ] = await Promise.all([
+        supabase.supabase
+          .from("profiles")
+          .select("portal_id, first_name, last_name, email, gender, grade_level")
+          .in("portal_id", studentIds),
+        supabase.supabase
+          .from("ds_student_final_grades")
+          .select("student_id, course_id, weighted_percentage, is_passing_year")
+          .eq("academic_year", academicYear),
+        supabase.supabase.from("ds_academic_years").select("year_label"),
+      ]);
+      if (gradesErr) {
+        // A silently-swallowed error here previously made every student look
+        // ungraded and defaulted them all to "repeat" — fail loudly instead.
+        console.error("lastYearRoster grades query failed:", gradesErr);
+        return res
+          .status(500)
+          .json({ success: false, error: gradesErr.message });
+      }
 
       const upcomingYear = (allYears || [])
         .map((y) => y.year_label)

@@ -60,5 +60,49 @@ if (!supabaseUrl || !supabaseKey) {
     },
   });
 
+  // This is a single PROCESS-WIDE client shared by every request. supabase-js
+  // resolves the PostgREST Authorization header as
+  //   (await this.auth.getSession()).session?.access_token ?? supabaseKey
+  // so the moment any route stores a session on it (auth.signInWithPassword in
+  // POST /login, auth.verifyOtp, auth.signUp), EVERY subsequent .from() query in
+  // the process silently runs as that one logged-in user instead of the service
+  // role. On RLS-protected tables with no policies (e.g.
+  // ds_registration_requests) that returns [] with HTTP 200 and no error, so it
+  // fails invisibly and stays broken until the process restarts.
+  //
+  // Server-side auth is always per-request — every call site passes an explicit
+  // token (auth.getUser(token), auth.refreshSession({refresh_token}), admin.*),
+  // so nothing here should ever read an ambient session. Refuse to hand one out
+  // and this client stays pinned to the service role no matter what any route
+  // does with .auth.
+  supabase.auth.getSession = async () => ({
+    data: { session: null },
+    error: null,
+  });
+
+  // supabase-js binds _getAccessToken at construction (SupabaseClient.js), so the
+  // getSession stub above is the only seam that works. It resolves the request
+  // token as `(await _getAccessToken()) ?? supabaseKey` (lib/fetch.js), so "no
+  // session" must surface as null/undefined here. Verify that still holds — if a
+  // supabase-js upgrade changes it, fail loudly at boot instead of silently
+  // serving empty result sets.
+  supabase._getAccessToken().then(
+    (token) => {
+      if (token != null && token !== supabaseKey) {
+        console.error(
+          "FATAL: Supabase data client is not pinned to the service-role key. " +
+            "RLS-protected tables will silently return empty results. " +
+            "Check the getSession stub in config/config.js against the installed supabase-js.",
+        );
+      }
+    },
+    () => {
+      console.error(
+        "FATAL: Could not verify the Supabase data client's access token resolution. " +
+          "Check the getSession stub in config/config.js against the installed supabase-js.",
+      );
+    },
+  );
+
   module.exports = { supabase, port, nodeEnv, isDevelopment, jwtSecret };
 }
