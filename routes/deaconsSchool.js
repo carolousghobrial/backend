@@ -3151,6 +3151,128 @@ app.post("/unenrollStudent", async (req, res) => {
   }
 });
 
+// GET a student's current active enrollment (whichever one, most recent by
+// enrolled_date) — used by admin screens that let a coordinator see/change
+// which class someone actually landed in after being linked/enrolled.
+app.get("/studentEnrollment/active/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { data, error } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select(
+        `enrollment_id, student_id, course_id, academic_year, enrolled_date,
+         ds_courses:course_id ( course_id, class_name, academic_year )`,
+      )
+      .eq("student_id", studentId)
+      .eq("is_active", true)
+      .order("enrolled_date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    if (!data)
+      return res
+        .status(404)
+        .json({ success: false, error: "No active enrollment for this student" });
+
+    res.json({
+      success: true,
+      data: {
+        enrollment_id: data.enrollment_id,
+        student_id: data.student_id,
+        course_id: data.course_id,
+        class_name: data.ds_courses?.class_name || "",
+        academic_year: data.academic_year,
+      },
+    });
+  } catch (err) {
+    console.error("studentEnrollment/active error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// PUT reassign an existing enrollment to a different course, WITHIN THE SAME
+// academic year — a straight correction (wrong class picked at enroll time),
+// not a promotion/re-enrollment, so payment/enrolled_date are left untouched.
+// (mutation → auto-guarded, staff only.)
+app.put("/studentEnrollment/:enrollmentId/course", async (req, res) => {
+  try {
+    const { enrollmentId } = req.params;
+    const { course_id } = req.body || {};
+    if (!course_id) {
+      return res
+        .status(400)
+        .json({ success: false, error: "course_id is required" });
+    }
+
+    const { data: enrollment, error: enrollErr } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id, student_id, course_id, academic_year, is_active")
+      .eq("enrollment_id", enrollmentId)
+      .maybeSingle();
+    if (enrollErr)
+      return res.status(500).json({ success: false, error: enrollErr.message });
+    if (!enrollment)
+      return res.status(404).json({ success: false, error: "Enrollment not found" });
+
+    if (enrollment.course_id === course_id) {
+      return res.json({ success: true, message: "Already in that class", data: enrollment });
+    }
+
+    const { data: newCourse, error: courseErr } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id, class_name, academic_year")
+      .eq("course_id", course_id)
+      .maybeSingle();
+    if (courseErr)
+      return res.status(500).json({ success: false, error: courseErr.message });
+    if (!newCourse)
+      return res.status(404).json({ success: false, error: "Course not found" });
+    if (newCourse.academic_year !== enrollment.academic_year) {
+      return res.status(400).json({
+        success: false,
+        error: `That class belongs to ${newCourse.academic_year}, not ${enrollment.academic_year}. Use the promotion/registration flow to move someone to a different year.`,
+      });
+    }
+
+    // Guard against creating a duplicate active enrollment for the same
+    // student+course+year (e.g. switching back to a class they're already
+    // separately enrolled in).
+    const { data: dup } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id")
+      .eq("student_id", enrollment.student_id)
+      .eq("course_id", course_id)
+      .eq("academic_year", enrollment.academic_year)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (dup) {
+      return res.status(409).json({
+        success: false,
+        error: "This student already has an active enrollment in that class",
+      });
+    }
+
+    const { data: updated, error: updateErr } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .update({ course_id })
+      .eq("enrollment_id", enrollmentId)
+      .select()
+      .single();
+    if (updateErr)
+      return res.status(500).json({ success: false, error: updateErr.message });
+
+    res.json({
+      success: true,
+      message: `Moved to ${newCourse.class_name}`,
+      data: { ...updated, class_name: newCourse.class_name },
+    });
+  } catch (err) {
+    console.error("studentEnrollment course switch error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 // ── Suggested next course: computes the level a student is headed into for
 // the current (registration-open) academic year, based on their most recent
 // prior enrollment, final grade, and profile gender/grade_level. Does NOT

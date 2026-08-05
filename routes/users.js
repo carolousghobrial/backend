@@ -2,6 +2,7 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const app = express();
 const supabase = require("../config/config");
+const { requirePrivilegedRole } = require("../middleware/auth");
 
 // Parse application/json
 app.use(bodyParser.json());
@@ -1838,8 +1839,20 @@ app.get(
 
 /**
  * Delete user
+ * Self-service account deletion, or admin/priest/coordinator deleting another
+ * account. Without this check any authenticated user could delete ANY other
+ * account by supplying their uid.
  */
-app.delete("/deleteUser/:uid", authenticateToken, async (req, res) => {
+const requireSelfOrPrivileged = (paramName) => (req, res, next) => {
+  if (req.params[paramName] === req.user.id) return next();
+  return requirePrivilegedRole(req, res, next);
+};
+
+app.delete(
+  "/deleteUser/:uid",
+  authenticateToken,
+  requireSelfOrPrivileged("uid"),
+  async (req, res) => {
   try {
     const { uid } = req.params;
 
@@ -1867,7 +1880,8 @@ app.delete("/deleteUser/:uid", authenticateToken, async (req, res) => {
       message: "Failed to delete user",
     });
   }
-});
+  },
+);
 
 /**
  * Register without email verification
