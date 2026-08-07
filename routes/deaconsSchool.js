@@ -714,9 +714,12 @@ app.get("/getHymns", async (req, res) => {
   res.send(deacons_school_hymns);
 });
 app.get("/getCourses", async (req, res) => {
-  let { data: deacons_school_hymns, error } = await supabase.supabase
-    .from("ds_courses")
-    .select("*");
+  const { academic_year } = req.query;
+  let query = supabase.supabase.from("ds_courses").select("*");
+  if (academic_year) {
+    query = query.eq("academic_year", academic_year);
+  }
+  let { data: deacons_school_hymns, error } = await query;
 
   res.send(deacons_school_hymns);
 });
@@ -1620,8 +1623,14 @@ app.get("/getStudentBehaviorHistory/:student_id", async (req, res) => {
 app.post("/addDSCalendarForLevel/:level", async (req, res) => {
   try {
     const level = req.params.level;
-    const { hymn_id, calendar_day, week_num, others_id, others_tablename } =
-      req.body;
+    const {
+      hymn_id,
+      calendar_day,
+      week_num,
+      others_id,
+      others_tablename,
+      academic_year,
+    } = req.body;
 
     console.log("Received data:", {
       level,
@@ -1630,12 +1639,13 @@ app.post("/addDSCalendarForLevel/:level", async (req, res) => {
       week_num,
       others_id,
       others_tablename,
+      academic_year,
     });
 
-    if (!level || !calendar_day || !week_num) {
+    if (!level || !calendar_day || !week_num || !academic_year) {
       return res.status(400).json({
         success: false,
-        message: "Level, calendar_day, and week_num are required",
+        message: "Level, calendar_day, week_num, and academic_year are required",
       });
     }
 
@@ -1646,14 +1656,17 @@ app.post("/addDSCalendarForLevel/:level", async (req, res) => {
       others_id: others_id || null,
       others_tablename: others_tablename || null,
       level: level,
+      academic_year: academic_year,
     };
 
-    // Try delete first, then insert (simple upsert alternative)
+    // Upsert keyed on (calendar_day, level, academic_year) so saving a new
+    // academic year's calendar adds new rows instead of overwriting another
+    // year's row that happens to share the same level.
     const { data, error } = await supabase.supabase
       .from("ds_calendar_week")
       .upsert(
         [calendarRow],
-        { onConflict: ["calendar_day", "level"] }, // Ensures uniqueness
+        { onConflict: ["calendar_day", "level", "academic_year"] },
       )
       .select();
 
@@ -5368,6 +5381,19 @@ app.get("/getCalendarByCourse/:course_id", async (req, res) => {
     .from("ds_calendar_week")
     .select("*")
     .contains("courses_id", [course_id]); // course_id must be inside an array
+  if (error) {
+    res.status(500).send(error.message);
+  } else {
+    res.send(data);
+  }
+});
+app.get("/getCalendarByLevelAndYear/:level/:academic_year", async (req, res) => {
+  const { level, academic_year } = req.params;
+  const { data, error } = await supabase.supabase
+    .from("ds_calendar_week")
+    .select("*")
+    .eq("level", level)
+    .eq("academic_year", academic_year);
   if (error) {
     res.status(500).send(error.message);
   } else {
