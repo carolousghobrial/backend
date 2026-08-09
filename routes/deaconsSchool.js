@@ -975,10 +975,47 @@ app.get("/getMyCoursesTaught/:id", async (req, res) => {
   console.log(data);
   console.log(error);
   if (error) {
-    res.status(500).send(error.message);
-  } else {
-    res.send(data);
+    return res.status(500).send(error.message);
   }
+
+  // The RPC returns every course the teacher has ever been assigned to,
+  // across every academic year, with no academic_year field of its own.
+  // Action pages (Take Attendance, Add Grades, Add Assignments) should
+  // only offer the class the teacher is teaching THIS year, so scope the
+  // result down by joining course_id back to ds_courses.academic_year --
+  // this filters without needing to touch the RPC itself.
+  const courseIds = [...new Set((data || []).map((c) => c.course_id).filter(Boolean))];
+  if (courseIds.length === 0) {
+    return res.send(data);
+  }
+
+  let targetYear = req.query.academic_year;
+  if (!targetYear) {
+    const { data: currentYear } = await supabase.supabase
+      .from("ds_academic_years")
+      .select("year_label")
+      .eq("is_current", true)
+      .single();
+    targetYear = currentYear?.year_label;
+  }
+
+  if (!targetYear) {
+    // No current year configured -- fall back to unscoped rather than
+    // silently hiding every course.
+    return res.send(data);
+  }
+
+  const { data: yearCourses, error: yearError } = await supabase.supabase
+    .from("ds_courses")
+    .select("course_id")
+    .in("course_id", courseIds)
+    .eq("academic_year", targetYear);
+  if (yearError) {
+    return res.status(500).send(yearError.message);
+  }
+
+  const allowedIds = new Set((yearCourses || []).map((c) => c.course_id));
+  res.send((data || []).filter((c) => allowedIds.has(c.course_id)));
 });
 app.post("/addCoursesToCalendar", async (req, res) => {
   const levelMap = {
@@ -4197,6 +4234,36 @@ app.post("/academicYears", async (req, res) => {
   }
 });
 
+app.patch("/academicYears/:yearId", async (req, res) => {
+  try {
+    const { yearId } = req.params;
+    const { start_date, end_date } = req.body;
+
+    if (!start_date && !end_date) {
+      return res.status(400).json({
+        success: false,
+        error: "start_date or end_date is required",
+      });
+    }
+
+    const updates = {};
+    if (start_date) updates.start_date = start_date;
+    if (end_date) updates.end_date = end_date;
+
+    const { data, error } = await supabase.supabase
+      .from("ds_academic_years")
+      .update(updates)
+      .eq("year_id", yearId)
+      .select()
+      .single();
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 app.patch("/academicYears/:yearId/setCurrent", async (req, res) => {
   try {
     const { yearId } = req.params;
@@ -5385,6 +5452,88 @@ app.get("/getCalendarByCourse/:course_id", async (req, res) => {
     res.status(500).send(error.message);
   } else {
     res.send(data);
+  }
+});
+app.post("/copyDSCalendarToYear", async (req, res) => {
+  try {
+    const { level, from_academic_year, to_academic_year } = req.body;
+
+    if (!level || !from_academic_year || !to_academic_year) {
+      return res.status(400).json({
+        success: false,
+        message: "level, from_academic_year, and to_academic_year are required",
+      });
+    }
+    if (from_academic_year === to_academic_year) {
+      return res.status(400).json({
+        success: false,
+        message: "from_academic_year and to_academic_year must differ",
+      });
+    }
+
+    const { data: toYear, error: toYearError } = await supabase.supabase
+      .from("ds_academic_years")
+      .select("start_date")
+      .eq("year_label", to_academic_year)
+      .single();
+    if (toYearError || !toYear) {
+      return res.status(404).json({
+        success: false,
+        message: "Destination academic year not found",
+      });
+    }
+
+    const { data: sourceRows, error: sourceError } = await supabase.supabase
+      .from("ds_calendar_week")
+      .select("week_num, hymn_id, others_id, others_tablename")
+      .eq("level", level)
+      .eq("academic_year", from_academic_year);
+    if (sourceError) {
+      return res.status(500).json({ success: false, message: sourceError.message });
+    }
+    if (!sourceRows || sourceRows.length === 0) {
+      return res.json({ success: true, message: "No source calendar rows to copy", copied: 0 });
+    }
+
+    // Recompute each week's calendar_day from the destination year's own
+    // start_date (start_date + (week_num - 1) * 7 days), matching exactly
+    // how the admin UI generates its week list -- pure Y/M/D arithmetic so
+    // the result doesn't depend on server timezone.
+    const [startYear, startMonth, startDay] = toYear.start_date
+      .split("-")
+      .map(Number);
+
+    const rowsToUpsert = sourceRows.map((row) => {
+      const d = new Date(startYear, startMonth - 1, startDay + (row.week_num - 1) * 7);
+      const calendar_day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      return {
+        level,
+        academic_year: to_academic_year,
+        week_num: row.week_num,
+        calendar_day,
+        hymn_id: row.hymn_id ?? null,
+        others_id: row.others_id ?? null,
+        others_tablename: row.others_tablename ?? null,
+      };
+    });
+
+    const { data, error } = await supabase.supabase
+      .from("ds_calendar_week")
+      .upsert(rowsToUpsert, { onConflict: ["calendar_day", "level", "academic_year"] })
+      .select();
+    if (error) {
+      return res.status(500).json({ success: false, message: error.message });
+    }
+
+    res.json({
+      success: true,
+      message: `Copied ${data.length} week(s) from ${from_academic_year} to ${to_academic_year}`,
+      copied: data.length,
+      data,
+    });
+  } catch (error) {
+    console.error("copyDSCalendarToYear error:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 app.get("/getCalendarByLevelAndYear/:level/:academic_year", async (req, res) => {
