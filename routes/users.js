@@ -1575,6 +1575,99 @@ app.get("/getUserEmails", async (req, res) => {
 });
 
 /**
+ * Bulk-import portal directory members into `profiles` as login-less
+ * directory rows -- the same kind of record the DS self-service sign-in
+ * flow above reconciles with a real login later (see findDirectoryMatches).
+ * No Supabase Auth account is created here; `id` is left for the DB
+ * default so this never collides with an auth-linked profile id.
+ */
+app.post("/importPortalUsers", authenticateToken, async (req, res) => {
+  try {
+    const { users } = req.body;
+    if (!Array.isArray(users) || users.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "users array is required" });
+    }
+
+    const portalIds = [
+      ...new Set(
+        users.map((u) => u?.portal_id).filter(Boolean).map(String),
+      ),
+    ];
+    if (portalIds.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Every user requires a portal_id" });
+    }
+
+    // Re-check against the DB right before inserting -- the client's
+    // "missing" list may be stale if another admin already imported some
+    // of these since the page loaded.
+    const { data: existing, error: existingError } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id")
+      .in("portal_id", portalIds);
+
+    if (existingError) {
+      return res
+        .status(500)
+        .json({ success: false, message: existingError.message });
+    }
+
+    const existingSet = new Set(
+      (existing || []).map((p) => String(p.portal_id)),
+    );
+
+    const rows = [];
+    const skipped = [];
+    for (const u of users) {
+      const portalId = u?.portal_id ? String(u.portal_id) : null;
+      if (!portalId) {
+        skipped.push({ portal_id: null, reason: "Missing portal_id" });
+        continue;
+      }
+      if (existingSet.has(portalId)) {
+        skipped.push({ portal_id: portalId, reason: "Already exists" });
+        continue;
+      }
+      rows.push({
+        portal_id: portalId,
+        first_name: u.first_name || null,
+        last_name: u.last_name || null,
+        dob: u.dob || null,
+        cellphone: u.cellphone || null,
+        email: u.email || null,
+        family_id: u.family_id || null,
+        family_role: u.family_role || null,
+      });
+    }
+
+    if (rows.length === 0) {
+      return res.json({ success: true, added: [], skipped });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("profiles")
+      .insert(rows)
+      .select("id, portal_id, first_name, last_name");
+
+    if (error) {
+      return res
+        .status(500)
+        .json({ success: false, message: error.message, skipped });
+    }
+
+    res.status(201).json({ success: true, added: data, skipped });
+  } catch (error) {
+    console.error("Import portal users error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to import portal users" });
+  }
+});
+
+/**
  * Get user by ID
  */
 app.get("/getUserById/:id", authenticateToken, async (req, res) => {

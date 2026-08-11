@@ -67,7 +67,15 @@ function parsePagination(query, defaultLimit = 50) {
   );
   return { page, limit, from: (page - 1) * limit, to: page * limit - 1 };
 }
-const { supabase: supabaseTunes } = require("../config/config");
+// seven_tunes_books lives in a separate "7 Tunes" Supabase project, not the
+// main church DB -- must use its own client (see routes/github.js), not the
+// main `supabase` client from config/config.js, or every query 500s with
+// "relation seven_tunes_books does not exist".
+const { createClient } = require("@supabase/supabase-js");
+const supabaseTunes = createClient(
+  process.env.SUPABASE_URL_BOOKS,
+  process.env.SUPABASE_SERVICE_KEY_BOOKS,
+);
 
 // Routes that handle their own auth (exempted from global mutation middleware)
 const AUTH_EXEMPT_ROUTES = new Set([
@@ -1686,6 +1694,22 @@ app.post("/addDSCalendarForLevel/:level", async (req, res) => {
       });
     }
 
+    // The public course-scoped calendar (getCalendarByCourse) looks up rows
+    // by courses_id containing the course_id, not by level/academic_year, so
+    // every save here must also stamp the matching course_id(s) for this
+    // level + academic_year onto the row -- otherwise newly added weeks are
+    // invisible on /deaconsSchool/calendar/:courseId until someone manually
+    // re-runs the old /addCoursesToCalendar backfill.
+    const { data: matchingCourses, error: coursesError } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id")
+      .eq("level", level)
+      .eq("academic_year", academic_year);
+    if (coursesError) {
+      console.error("Error resolving courses for level/year:", coursesError);
+    }
+    const courseIds = (matchingCourses || []).map((c) => c.course_id);
+
     const calendarRow = {
       hymn_id: hymn_id || null,
       calendar_day: calendar_day,
@@ -1694,6 +1718,7 @@ app.post("/addDSCalendarForLevel/:level", async (req, res) => {
       others_tablename: others_tablename || null,
       level: level,
       academic_year: academic_year,
+      courses_id: courseIds,
     };
 
     // Upsert keyed on (calendar_day, level, academic_year) so saving a new
@@ -5663,18 +5688,100 @@ app.post("/newYear/setupCourses", async (req, res) => {
 
 // ─── End Year-End Close-Out & Re-enrollment ────────────────────────────────────
 
+/**
+ * One-time repair for rows saved before addDSCalendarForLevel/copyDSCalendarToYear
+ * started stamping courses_id: backfills courses_id on every ds_calendar_week
+ * row from ds_courses, scoped per (level, academic_year) pair so multi-year
+ * data doesn't get merged together.
+ */
+app.post("/backfillCalendarCourseIds", async (req, res) => {
+  try {
+    const { data: rows, error: rowsError } = await supabase.supabase
+      .from("ds_calendar_week")
+      .select("level, academic_year")
+      .order("level");
+    if (rowsError) return res.status(500).json({ success: false, message: rowsError.message });
+
+    const pairs = Array.from(
+      new Map(
+        (rows || []).map((r) => [`${r.level}::${r.academic_year}`, { level: r.level, academic_year: r.academic_year }]),
+      ).values(),
+    );
+
+    const results = [];
+    for (const { level, academic_year } of pairs) {
+      const { data: courses, error: coursesError } = await supabase.supabase
+        .from("ds_courses")
+        .select("course_id")
+        .eq("level", level)
+        .eq("academic_year", academic_year);
+      if (coursesError) {
+        results.push({ level, academic_year, error: coursesError.message });
+        continue;
+      }
+      const courseIds = (courses || []).map((c) => c.course_id);
+      const { data: updated, error: updateError } = await supabase.supabase
+        .from("ds_calendar_week")
+        .update({ courses_id: courseIds })
+        .eq("level", level)
+        .eq("academic_year", academic_year)
+        .select("calendar_day");
+      if (updateError) {
+        results.push({ level, academic_year, error: updateError.message });
+      } else {
+        results.push({ level, academic_year, courseIds, updatedWeeks: updated.length });
+      }
+    }
+
+    res.json({ success: true, results });
+  } catch (error) {
+    console.error("backfillCalendarCourseIds error:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 app.get("/getCalendarByCourse/:course_id", async (req, res) => {
   const course_id = req.params.course_id;
   console.log(course_id);
-  let { data, error } = await supabase.supabase
+
+  // The admin editor (addDSCalendarForLevel/copyDSCalendarToYear) is the
+  // source of truth and saves rows keyed by (level, academic_year), not by
+  // courses_id -- resolve through the course itself rather than relying on
+  // courses_id being backfilled.
+  const { data: course, error: courseError } = await supabase.supabase
+    .from("ds_courses")
+    .select("level, academic_year")
+    .eq("course_id", course_id)
+    .maybeSingle();
+  if (courseError) {
+    return res.status(500).send(courseError.message);
+  }
+
+  const rowsById = new Map();
+
+  if (course) {
+    const { data: levelRows, error: levelError } = await supabase.supabase
+      .from("ds_calendar_week")
+      .select("*")
+      .eq("level", course.level)
+      .eq("academic_year", course.academic_year);
+    if (levelError) {
+      return res.status(500).send(levelError.message);
+    }
+    (levelRows || []).forEach((row) => rowsById.set(row.id, row));
+  }
+
+  // Legacy fallback for any rows still only linked via courses_id.
+  const { data: legacyRows, error: legacyError } = await supabase.supabase
     .from("ds_calendar_week")
     .select("*")
-    .contains("courses_id", [course_id]); // course_id must be inside an array
-  if (error) {
-    res.status(500).send(error.message);
-  } else {
-    res.send(data);
+    .contains("courses_id", [course_id]);
+  if (legacyError) {
+    return res.status(500).send(legacyError.message);
   }
+  (legacyRows || []).forEach((row) => rowsById.set(row.id, row));
+
+  res.send(Array.from(rowsById.values()));
 });
 app.post("/copyDSCalendarToYear", async (req, res) => {
   try {
@@ -5725,6 +5832,19 @@ app.post("/copyDSCalendarToYear", async (req, res) => {
       .split("-")
       .map(Number);
 
+    // Stamp the destination year's course_id(s) for this level so the copied
+    // weeks are immediately visible on the public course-scoped calendar
+    // (getCalendarByCourse filters on courses_id, not level/academic_year).
+    const { data: destCourses, error: destCoursesError } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id")
+      .eq("level", level)
+      .eq("academic_year", to_academic_year);
+    if (destCoursesError) {
+      return res.status(500).json({ success: false, message: destCoursesError.message });
+    }
+    const destCourseIds = (destCourses || []).map((c) => c.course_id);
+
     const rowsToUpsert = sourceRows.map((row) => {
       const d = new Date(startYear, startMonth - 1, startDay + (row.week_num - 1) * 7);
       const calendar_day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -5736,6 +5856,7 @@ app.post("/copyDSCalendarToYear", async (req, res) => {
         hymn_id: row.hymn_id ?? null,
         others_id: row.others_id ?? null,
         others_tablename: row.others_tablename ?? null,
+        courses_id: destCourseIds,
       };
     });
 
