@@ -1856,6 +1856,208 @@ app.post("/addDSTeacher", async (req, res) => {
   }
 });
 
+app.post("/addDSTeachersBulk", async (req, res) => {
+  try {
+    const { teacher_ids, course_ids, role } = req.body;
+
+    if (
+      !Array.isArray(teacher_ids) ||
+      teacher_ids.length === 0 ||
+      !Array.isArray(course_ids) ||
+      course_ids.length === 0 ||
+      !role
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "teacher_ids (array), course_ids (array), and role are required",
+      });
+    }
+
+    // Mirrors /addDSTeacher's manual check-then-insert-or-update pattern
+    // (ds_course_teachers has no unique constraint on teacher_id/course_id
+    // to upsert against) -- just batched across the full teacher x course
+    // grid instead of one request per pair.
+    const { data: existingRows, error: existingError } = await supabase.supabase
+      .from("ds_course_teachers")
+      .select("teacher_id, course_id")
+      .in("teacher_id", teacher_ids)
+      .in("course_id", course_ids);
+    if (existingError) {
+      return res.status(500).json({ success: false, error: existingError.message });
+    }
+
+    const existingKeys = new Set(
+      (existingRows || []).map((r) => `${r.teacher_id}::${r.course_id}`),
+    );
+    const assignedDate = new Date().toISOString().split("T")[0];
+
+    const toInsert = [];
+    const toUpdate = [];
+    for (const teacher_id of teacher_ids) {
+      for (const course_id of course_ids) {
+        if (existingKeys.has(`${teacher_id}::${course_id}`)) {
+          toUpdate.push({ teacher_id, course_id });
+        } else {
+          toInsert.push({
+            teacher_id,
+            course_id,
+            role,
+            assigned_date: assignedDate,
+            is_active: true,
+          });
+        }
+      }
+    }
+
+    const results = [];
+    let errorCount = 0;
+
+    if (toInsert.length > 0) {
+      const { data, error } = await supabase.supabase
+        .from("ds_course_teachers")
+        .insert(toInsert)
+        .select();
+      if (error) {
+        console.error("addDSTeachersBulk insert error:", error);
+        errorCount += toInsert.length;
+      } else {
+        results.push(...(data || []));
+      }
+    }
+
+    for (const { teacher_id, course_id } of toUpdate) {
+      const { data, error } = await supabase.supabase
+        .from("ds_course_teachers")
+        .update({ role, is_active: true, assigned_date: assignedDate })
+        .eq("teacher_id", teacher_id)
+        .eq("course_id", course_id)
+        .select();
+      if (error) {
+        console.error("addDSTeachersBulk update error:", teacher_id, course_id, error);
+        errorCount++;
+      } else {
+        results.push(...(data || []));
+      }
+    }
+
+    const totalAttempted = teacher_ids.length * course_ids.length;
+    res.json({
+      success: errorCount === 0,
+      message:
+        `Assigned ${results.length} of ${totalAttempted} teacher/class combination(s)` +
+        (errorCount > 0 ? `, ${errorCount} failed` : ""),
+      data: results,
+    });
+  } catch (err) {
+    console.error("addDSTeachersBulk error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Distinct teachers assigned to any course in a given (default: last closed)
+// academic year, with the classes/roles they held -- powers the "Last
+// Year's Teachers" filter on the Add Teachers page so an admin can quickly
+// find and reassign returning teachers/coordinators.
+app.get("/getPreviousYearDSTeachers", async (req, res) => {
+  try {
+    let targetYear = req.query.academic_year;
+    if (!targetYear) {
+      const { data: lastClosed, error: lastClosedError } = await supabase.supabase
+        .from("ds_academic_years")
+        .select("year_label")
+        .eq("is_closed", true)
+        .order("year_label", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (lastClosedError) {
+        console.error("getPreviousYearDSTeachers: lastClosed lookup failed:", lastClosedError);
+        return res.status(500).json({ success: false, error: lastClosedError.message });
+      }
+      targetYear = lastClosed?.year_label || null;
+    }
+
+    if (!targetYear) {
+      return res.json({ success: true, academic_year: null, data: [] });
+    }
+
+    const { data: yearCourses, error: coursesError } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id, class_name, level")
+      .eq("academic_year", targetYear);
+    if (coursesError) {
+      console.error("getPreviousYearDSTeachers: courses lookup failed:", coursesError);
+      return res.status(500).json({ success: false, error: coursesError.message });
+    }
+
+    const courseIds = (yearCourses || []).map((c) => c.course_id);
+    if (courseIds.length === 0) {
+      return res.json({ success: true, academic_year: targetYear, data: [] });
+    }
+    const courseMap = new Map((yearCourses || []).map((c) => [c.course_id, c]));
+
+    // Fetch assignments and profiles as two plain queries instead of an
+    // embedded `profiles:teacher_id(...)` select -- that embed requires
+    // PostgREST to have a registered FK relationship between
+    // ds_course_teachers.teacher_id and profiles, which may not exist even
+    // though the relationship is logically true.
+    const { data: assignments, error: assignmentsError } = await supabase.supabase
+      .from("ds_course_teachers")
+      .select("teacher_id, course_id, role")
+      .in("course_id", courseIds);
+    if (assignmentsError) {
+      console.error("getPreviousYearDSTeachers: assignments lookup failed:", assignmentsError);
+      return res.status(500).json({ success: false, error: assignmentsError.message });
+    }
+
+    const teacherIds = [...new Set((assignments || []).map((a) => a.teacher_id).filter(Boolean))];
+    if (teacherIds.length === 0) {
+      return res.json({ success: true, academic_year: targetYear, data: [] });
+    }
+
+    const { data: teacherProfiles, error: profilesError } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id, first_name, last_name, email")
+      .in("portal_id", teacherIds);
+    if (profilesError) {
+      console.error("getPreviousYearDSTeachers: profiles lookup failed:", profilesError);
+      return res.status(500).json({ success: false, error: profilesError.message });
+    }
+    const profileMap = new Map((teacherProfiles || []).map((p) => [p.portal_id, p]));
+
+    const byTeacher = new Map();
+    for (const a of assignments || []) {
+      const profile = profileMap.get(a.teacher_id);
+      if (!profile) continue;
+      if (!byTeacher.has(a.teacher_id)) {
+        byTeacher.set(a.teacher_id, {
+          teacher_id: a.teacher_id,
+          portal_id: profile.portal_id,
+          first_name: profile.first_name,
+          last_name: profile.last_name,
+          email: profile.email,
+          classes: [],
+        });
+      }
+      const course = courseMap.get(a.course_id);
+      byTeacher.get(a.teacher_id).classes.push({
+        course_id: a.course_id,
+        class_name: course?.class_name || a.course_id,
+        level: course?.level || null,
+        role: a.role,
+      });
+    }
+
+    res.json({
+      success: true,
+      academic_year: targetYear,
+      data: Array.from(byTeacher.values()),
+    });
+  } catch (err) {
+    console.error("getPreviousYearDSTeachers error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 /**
  * Get students enrolled in a specific course
  * GET /getStudentsByCourse/:courseId
@@ -4200,10 +4402,28 @@ app.get("/academicYears/current", async (req, res) => {
     .from("ds_academic_years")
     .select("*")
     .eq("is_current", true)
-    .single();
+    .maybeSingle();
   if (error)
     return res.status(500).json({ success: false, error: error.message });
-  res.json({ success: true, data });
+  if (data) {
+    return res.json({ success: true, data });
+  }
+
+  // No year is explicitly marked is_current (e.g. mid-rollover) -- fall
+  // back to the most recently started year instead of 500ing out every
+  // page (course-attendance, behavior-report, ds-course-roster,
+  // add-students-from-profiles, add-new-teachers) that scopes its class
+  // list off "the current year."
+  const { data: fallback, error: fallbackError } = await supabase.supabase
+    .from("ds_academic_years")
+    .select("*")
+    .order("start_date", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (fallbackError)
+    return res.status(500).json({ success: false, error: fallbackError.message });
+
+  res.json({ success: true, data: fallback || null });
 });
 
 app.post("/academicYears", async (req, res) => {
@@ -4237,18 +4457,20 @@ app.post("/academicYears", async (req, res) => {
 app.patch("/academicYears/:yearId", async (req, res) => {
   try {
     const { yearId } = req.params;
-    const { start_date, end_date } = req.body;
+    const { start_date, end_date, test_date_1, test_date_2 } = req.body;
 
-    if (!start_date && !end_date) {
+    if (!start_date && !end_date && !test_date_1 && !test_date_2) {
       return res.status(400).json({
         success: false,
-        error: "start_date or end_date is required",
+        error: "start_date, end_date, test_date_1, or test_date_2 is required",
       });
     }
 
     const updates = {};
     if (start_date) updates.start_date = start_date;
     if (end_date) updates.end_date = end_date;
+    if (test_date_1) updates.test_date_1 = test_date_1;
+    if (test_date_2) updates.test_date_2 = test_date_2;
 
     const { data, error } = await supabase.supabase
       .from("ds_academic_years")
@@ -5586,6 +5808,62 @@ app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
 // Get all grading categories
 app.get("/getGradingCategories", async (req, res) => {
   try {
+    let academicYear = req.query.academic_year;
+    if (!academicYear) {
+      const { data: currentYear } = await supabase.supabase
+        .from("ds_academic_years")
+        .select("year_label")
+        .eq("is_current", true)
+        .maybeSingle();
+      academicYear = currentYear?.year_label || null;
+    }
+
+    if (academicYear) {
+      const { data: yearWeights, error: weightsError } = await supabase.supabase
+        .from("ds_grading_category_weights")
+        .select("category_id, weight_percentage, is_active")
+        .eq("academic_year", academicYear);
+
+      // Only take the year-scoped path once that year has actually been
+      // seeded into ds_grading_category_weights (see
+      // backend/supabase/snippets/add_year_scoped_grading_weights.sql).
+      // Otherwise fall through to the legacy query below unchanged.
+      if (!weightsError && yearWeights && yearWeights.length > 0) {
+        const { data: categories, error: categoriesError } = await supabase.supabase
+          .from("ds_grading_categories")
+          .select("*")
+          .order("category_name");
+
+        if (categoriesError) {
+          console.error("Error fetching grading categories:", categoriesError);
+          return res.status(500).json({ success: false, error: categoriesError.message });
+        }
+
+        const weightMap = new Map(yearWeights.map((w) => [w.category_id, w]));
+        const data = (categories || [])
+          .map((c) => {
+            const w = weightMap.get(c.category_id);
+            if (!w) return null;
+            // weight_percentage/is_active are overridden per-year here;
+            // every other column (category_name, display_group, ...)
+            // passes through from ds_grading_categories unchanged.
+            return {
+              ...c,
+              weight_percentage: w.weight_percentage,
+              is_active: w.is_active,
+              academic_year: academicYear,
+            };
+          })
+          .filter((c) => c && c.is_active);
+
+        return res.json({ success: true, data, academic_year: academicYear });
+      }
+    }
+
+    // Legacy fallback -- runs when no year-scoped weights exist yet for
+    // the resolved year (including before the Phase 1 migration has
+    // been applied at all). Preserves the original response shape
+    // exactly so existing callers keep working.
     const { data, error } = await supabase.supabase
       .from("ds_grading_categories")
       .select("*")
@@ -5598,6 +5876,43 @@ app.get("/getGradingCategories", async (req, res) => {
     }
 
     res.json({ success: true, data });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// Year-scoped grading policy (passing grade, attendance floor, late-test
+// parameters). Returns legacy-equivalent defaults if the year hasn't
+// been seeded into ds_grading_policy yet (or the table doesn't exist),
+// so callers never have to special-case "policy not configured."
+app.get("/getGradingPolicy/:academicYear", async (req, res) => {
+  try {
+    const { academicYear } = req.params;
+
+    const { data, error } = await supabase.supabase
+      .from("ds_grading_policy")
+      .select("*")
+      .eq("academic_year", academicYear)
+      .maybeSingle();
+
+    if (error) {
+      console.error("Error fetching grading policy:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    const policy = data || {
+      academic_year: academicYear,
+      passing_percentage: 60,
+      min_attendance_percentage: 50,
+      late_policy_enabled: false,
+      late_first_week_cap: 85,
+      late_weekly_drop: 15,
+      late_grace_days: 0,
+      renormalize_partial: false,
+    };
+
+    res.json({ success: true, data: policy });
   } catch (err) {
     console.error("Unexpected error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
@@ -5782,6 +6097,78 @@ app.get("/getAvailableItems/:category", async (req, res) => {
   }
 });
 
+// Resolve whether a grading category is part of a course's academic-year
+// rubric. Fails OPEN (returns { allowed: true }) whenever the year-scoped
+// weights migration (backend/supabase/snippets/add_year_scoped_grading_weights.sql)
+// hasn't been run yet, or a given year hasn't been seeded into
+// ds_grading_category_weights -- this guard should never be the reason
+// assessment-item creation breaks before that migration lands.
+async function isCategoryAllowedForCourse(category_id, course_id) {
+  const { data: course } = await supabase.supabase
+    .from("ds_courses")
+    .select("academic_year")
+    .eq("course_id", course_id)
+    .single();
+
+  if (!course?.academic_year) {
+    return { allowed: true };
+  }
+
+  const { data: yearWeights, error } = await supabase.supabase
+    .from("ds_grading_category_weights")
+    .select("category_id, is_active")
+    .eq("academic_year", course.academic_year);
+
+  if (error || !yearWeights || yearWeights.length === 0) {
+    // Table missing, or this year hasn't been seeded -- don't block.
+    return { allowed: true };
+  }
+
+  const thisCategory = yearWeights.find((w) => w.category_id === category_id);
+  if (thisCategory && thisCategory.is_active) {
+    return { allowed: true };
+  }
+
+  const { data: categoryInfo } = await supabase.supabase
+    .from("ds_grading_categories")
+    .select("category_name")
+    .eq("category_id", category_id)
+    .single();
+
+  return {
+    allowed: false,
+    academic_year: course.academic_year,
+    category_name: categoryInfo?.category_name || "This category",
+  };
+}
+
+// Auto-assigns a due_date for a new assessment item from the course's
+// academic year's two fixed test dates (ds_academic_years.test_date_1/
+// test_date_2), based on today's date -- an item created on or before
+// test_date_1 gets that date; created any time after gets test_date_2.
+// Returns null (no auto due date) if the year has no test dates
+// configured, so this never blocks item creation.
+async function resolveAutoDueDate(course_id) {
+  const { data: course } = await supabase.supabase
+    .from("ds_courses")
+    .select("academic_year")
+    .eq("course_id", course_id)
+    .single();
+
+  if (!course?.academic_year) return null;
+
+  const { data: year } = await supabase.supabase
+    .from("ds_academic_years")
+    .select("test_date_1, test_date_2")
+    .eq("year_label", course.academic_year)
+    .single();
+
+  if (!year?.test_date_1 || !year?.test_date_2) return null;
+
+  const today = new Date().toISOString().split("T")[0];
+  return today <= year.test_date_1 ? year.test_date_1 : year.test_date_2;
+}
+
 // Create assessment item
 app.post("/createAssessmentItem", async (req, res) => {
   try {
@@ -5792,6 +6179,8 @@ app.post("/createAssessmentItem", async (req, res) => {
       item_name,
       item_reference,
       reference_id,
+      due_date,
+      apply_late_policy,
     } = req.body;
     console.log(course_id);
     console.log(item_name);
@@ -5803,6 +6192,18 @@ app.post("/createAssessmentItem", async (req, res) => {
       });
     }
 
+    const categoryCheck = await isCategoryAllowedForCourse(category_id, course_id);
+    if (!categoryCheck.allowed) {
+      return res.status(400).json({
+        success: false,
+        error: `${categoryCheck.category_name} is not part of the ${categoryCheck.academic_year} grading rubric`,
+      });
+    }
+
+    // Explicit due_date (from the edit form's manual override) always
+    // wins; otherwise auto-assign from the year's two test dates.
+    const resolvedDueDate = due_date || await resolveAutoDueDate(course_id);
+
     const { data, error } = await supabase.supabase
       .from("ds_assessment_items")
       .insert([
@@ -5813,6 +6214,8 @@ app.post("/createAssessmentItem", async (req, res) => {
           item_name,
           item_reference: item_reference || null,
           reference_id: reference_id || null,
+          due_date: resolvedDueDate,
+          apply_late_policy: apply_late_policy !== false,
           is_active: true,
         },
       ])
@@ -5901,6 +6304,10 @@ app.post("/submitStudentScore", async (req, res) => {
       points_earned,
       scored_by,
       notes,
+      taken_date,
+      late_exempt,
+      late_cap_override,
+      late_reason,
     } = req.body;
 
     // Validation
@@ -5914,6 +6321,13 @@ app.post("/submitStudentScore", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "All required fields must be provided",
+      });
+    }
+
+    if ((late_exempt || late_cap_override !== undefined) && !late_reason) {
+      return res.status(400).json({
+        success: false,
+        error: "late_reason is required when marking a score exempt or overriding its late cap",
       });
     }
 
@@ -5937,6 +6351,8 @@ app.post("/submitStudentScore", async (req, res) => {
       points_possible = hymnData?.points || 100;
     }
 
+    const hasLateOverride = !!late_exempt || late_cap_override !== undefined;
+
     const { data, error } = await supabase.supabase
       .from("ds_student_scores")
       .upsert(
@@ -5951,10 +6367,28 @@ app.post("/submitStudentScore", async (req, res) => {
             scored_by,
             notes: notes || null,
             scored_date: new Date().toISOString().split("T")[0],
+            // taken_date is when the student sat the test, teacher-editable,
+            // distinct from scored_date (server-set, when it was entered).
+            // Falls back to today when not provided, matching legacy
+            // behavior for clients that don't send it yet.
+            taken_date: taken_date || new Date().toISOString().split("T")[0],
+            late_exempt: !!late_exempt,
+            late_cap_override:
+              late_cap_override !== undefined ? parseFloat(late_cap_override) : null,
+            late_reason: hasLateOverride ? late_reason : null,
+            late_override_by: hasLateOverride ? req.user?.id || scored_by || null : null,
+            late_override_at: hasLateOverride ? new Date().toISOString() : null,
           },
         ],
         {
-          onConflict: "student_id,course_id,quarter_id,item_id",
+          // ds_student_scores has two unique indexes: one on
+          // (student_id,course_id,item_id) and one including quarter_id.
+          // The quarter_id one doesn't enforce uniqueness when quarter_id
+          // is NULL (Postgres treats NULL <> NULL), and quarter_id is
+          // routinely NULL from the grading UI -- targeting it caused
+          // re-scoring the same item to silently insert a duplicate row
+          // instead of updating. Match submitBatchScores's target instead.
+          onConflict: "student_id,course_id,item_id",
         },
       )
       .select();
@@ -6154,13 +6588,46 @@ app.post("/submitBatchScores", async (req, res) => {
       const roundedPointsPossible = Math.round(pointsPossible * 100) / 100;
       const resolvedScoredBy = score?.scored_by || scored_by || "system";
 
+      const rowHasLateOverride =
+        !!score?.late_exempt || score?.late_cap_override !== undefined;
+      if (rowHasLateOverride && !score?.late_reason) {
+        skippedRows.push({
+          index,
+          item_id: score.item_id,
+          reason:
+            "late_reason is required when marking a score exempt or overriding its late cap",
+        });
+        return acc;
+      }
+
+      // Whitelist columns explicitly instead of spreading the raw client
+      // row -- the previous `...score` spread let any field the client
+      // sent reach the insert unvetted.
       acc.push({
-        ...score,
+        student_id: score.student_id,
+        course_id: score.course_id,
         quarter_id: score?.quarter_id || null,
+        item_id: score.item_id,
         points_earned: roundedPointsEarned,
         points_possible: roundedPointsPossible,
         scored_by: resolvedScoredBy,
+        notes: score?.notes || null,
         scored_date: new Date().toISOString().split("T")[0],
+        // taken_date is when the student sat the test (teacher-editable);
+        // the client already sends a date in `scored_date` today via the
+        // UI's "Date" field, which this endpoint used to silently
+        // overwrite -- route it here instead of discarding it.
+        taken_date: score?.taken_date || score?.scored_date || new Date().toISOString().split("T")[0],
+        late_exempt: !!score?.late_exempt,
+        late_cap_override:
+          score?.late_cap_override !== undefined
+            ? Number.parseFloat(score.late_cap_override)
+            : null,
+        late_reason: rowHasLateOverride ? score.late_reason : null,
+        late_override_by: rowHasLateOverride
+          ? req.user?.id || resolvedScoredBy || null
+          : null,
+        late_override_at: rowHasLateOverride ? new Date().toISOString() : null,
       });
 
       return acc;
@@ -6423,6 +6890,89 @@ app.post("/recalculateGrade", async (req, res) => {
   }
 });
 
+// Bulk-recalculate every actively-enrolled student's grade for one
+// course, so activating a new grading rubric (or fixing a bad score)
+// doesn't require the client to loop /recalculateGrade calls one
+// student at a time.
+app.post("/recalculateCourse/:courseId", async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const { quarter_id } = req.body || {};
+
+    if (!courseId) {
+      return res.status(400).json({
+        success: false,
+        error: "Course ID is required",
+      });
+    }
+
+    const { data: enrollments, error: enrollError } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("student_id")
+      .eq("course_id", courseId)
+      .eq("is_active", true);
+
+    if (enrollError) {
+      console.error(
+        "Error fetching enrollments for course recalculation:",
+        enrollError,
+      );
+      return res.status(500).json({ success: false, error: enrollError.message });
+    }
+
+    const studentIds = [
+      ...new Set((enrollments || []).map((e) => e.student_id).filter(Boolean)),
+    ];
+
+    if (studentIds.length === 0) {
+      return res.json({
+        success: true,
+        message: "No active enrollments to recalculate",
+        recalculated: 0,
+        failed: 0,
+      });
+    }
+
+    let recalculated = 0;
+    const failures = [];
+
+    // Sequential, not Promise.all -- this calls a SECURITY DEFINER
+    // Postgres function once per student; keeping it sequential avoids
+    // hammering the DB with a burst of concurrent writes for courses
+    // with large rosters.
+    for (const studentId of studentIds) {
+      const { error } = await supabase.supabase.rpc("calculate_student_grade", {
+        p_student_id: studentId,
+        p_course_id: courseId,
+        p_quarter_id: quarter_id ?? null,
+      });
+
+      if (error) {
+        console.error(
+          `Error recalculating grade for student ${studentId} in course ${courseId}:`,
+          error,
+        );
+        failures.push({ student_id: studentId, error: error.message });
+      } else {
+        recalculated++;
+      }
+    }
+
+    res.json({
+      success: failures.length === 0,
+      message:
+        `Recalculated ${recalculated} of ${studentIds.length} student(s)` +
+        (failures.length > 0 ? `, ${failures.length} failed` : ""),
+      recalculated,
+      failed: failures.length,
+      failures: failures.slice(0, 25),
+    });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 // Delete assessment item
 app.delete("/deleteAssessmentItem/:itemId", async (req, res) => {
   try {
@@ -6506,6 +7056,30 @@ app.put("/updateAssessmentItem/:itemId", async (req, res) => {
         success: false,
         error: `Assessment item with ID ${itemId} not found`,
       });
+    }
+
+    // If the update moves this item into a different category, make
+    // sure that category is actually part of the item's course's
+    // academic-year rubric (see isCategoryAllowedForCourse above).
+    if (updates.category_id) {
+      const { data: itemCourse } = await supabase.supabase
+        .from("ds_assessment_items")
+        .select("course_id")
+        .eq("item_id", itemId)
+        .single();
+
+      if (itemCourse?.course_id) {
+        const categoryCheck = await isCategoryAllowedForCourse(
+          updates.category_id,
+          itemCourse.course_id,
+        );
+        if (!categoryCheck.allowed) {
+          return res.status(400).json({
+            success: false,
+            error: `${categoryCheck.category_name} is not part of the ${categoryCheck.academic_year} grading rubric`,
+          });
+        }
+      }
     }
 
     // Now perform the update
