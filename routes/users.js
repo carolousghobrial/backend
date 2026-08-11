@@ -219,7 +219,7 @@ app.post("/login/phone/verify-otp", async (req, res) => {
   }
 });
 
-// ==================== DEACON SCHOOL SELF-SERVICE SIGN-IN ====================
+// ==================== Hymns SchoolL SELF-SERVICE SIGN-IN ====================
 // Flow for people who don't know their login: identify them from the church
 // directory (`profiles`) by DOB + last name, then email a magic sign-in link
 // to the address on file. Login-less directory records get an account created
@@ -246,7 +246,10 @@ function dayBounds(dobInput) {
   const d = new Date(`${dobInput}T00:00:00Z`);
   if (isNaN(d.getTime())) return null;
   const next = new Date(d.getTime() + 24 * 60 * 60 * 1000);
-  return { start: d.toISOString().slice(0, 10), end: next.toISOString().slice(0, 10) };
+  return {
+    start: d.toISOString().slice(0, 10),
+    end: next.toISOString().slice(0, 10),
+  };
 }
 
 // Find directory profiles matching last_name + dob, narrowed by first_name /
@@ -284,9 +287,8 @@ async function findDirectoryMatches({ last_name, dob, first_name, cellphone }) {
 // Does this profile row already have a Supabase auth login?
 async function profileHasLogin(profileId) {
   try {
-    const { data, error } = await supabase.supabase.auth.admin.getUserById(
-      profileId,
-    );
+    const { data, error } =
+      await supabase.supabase.auth.admin.getUserById(profileId);
     return !error && !!data?.user;
   } catch {
     return false;
@@ -483,7 +485,8 @@ app.post("/login/ds/claim-profile", authenticateToken, async (req, res) => {
       .from("profiles")
       .select("*")
       .eq("portal_id", claimPortalId);
-    const directoryProfile = (dirRows || []).find((r) => r.id !== authId) || null;
+    const directoryProfile =
+      (dirRows || []).find((r) => r.id !== authId) || null;
     const alreadyOwned = (dirRows || []).some((r) => r.id === authId);
 
     if (alreadyOwned || !directoryProfile) {
@@ -517,7 +520,10 @@ app.post("/login/ds/claim-profile", authenticateToken, async (req, res) => {
       .eq("id", authId);
 
     if (authRows && authRows.length > 0) {
-      await supabase.supabase.from("profiles").update(identity).eq("id", authId);
+      await supabase.supabase
+        .from("profiles")
+        .update(identity)
+        .eq("id", authId);
     } else {
       await supabase.supabase
         .from("profiles")
@@ -1592,7 +1598,10 @@ app.post("/importPortalUsers", authenticateToken, async (req, res) => {
 
     const portalIds = [
       ...new Set(
-        users.map((u) => u?.portal_id).filter(Boolean).map(String),
+        users
+          .map((u) => u?.portal_id)
+          .filter(Boolean)
+          .map(String),
       ),
     ];
     if (portalIds.length === 0) {
@@ -1946,33 +1955,33 @@ app.delete(
   authenticateToken,
   requireSelfOrPrivileged("uid"),
   async (req, res) => {
-  try {
-    const { uid } = req.params;
+    try {
+      const { uid } = req.params;
 
-    const { data: authData, error: authError } =
-      await supabase.supabase.auth.admin.deleteUser(uid);
+      const { data: authData, error: authError } =
+        await supabase.supabase.auth.admin.deleteUser(uid);
 
-    if (authError) {
-      return res.status(500).json({
+      if (authError) {
+        return res.status(500).json({
+          success: false,
+          message: authError.message,
+        });
+      }
+
+      await supabase.supabase.from("profiles").delete().eq("id", uid);
+
+      res.json({
+        success: true,
+        message: "User deleted successfully",
+        data: authData,
+      });
+    } catch (error) {
+      console.error("Delete user error:", error);
+      res.status(500).json({
         success: false,
-        message: authError.message,
+        message: "Failed to delete user",
       });
     }
-
-    await supabase.supabase.from("profiles").delete().eq("id", uid);
-
-    res.json({
-      success: true,
-      message: "User deleted successfully",
-      data: authData,
-    });
-  } catch (error) {
-    console.error("Delete user error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete user",
-    });
-  }
   },
 );
 

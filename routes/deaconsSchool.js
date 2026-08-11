@@ -5781,6 +5781,36 @@ app.get("/getCalendarByCourse/:course_id", async (req, res) => {
   }
   (legacyRows || []).forEach((row) => rowsById.set(row.id, row));
 
+  // Breaks (Thanksgiving, Christmas, Holy Week, etc.) are church-wide -- the
+  // same calendar date for every level -- but whoever fills in each level's
+  // calendar individually doesn't always remember to mark them. If another
+  // level in the same academic year has a week explicitly marked as a break
+  // (hymn_id 0) on a date this course left blank, treat it as a break here
+  // too rather than showing an empty row.
+  const unmarkedDays = Array.from(rowsById.values())
+    .filter((row) => row.hymn_id === null || row.hymn_id === undefined)
+    .map((row) => row.calendar_day);
+
+  if (course && unmarkedDays.length) {
+    const { data: breakRows, error: breakError } = await supabase.supabase
+      .from("ds_calendar_week")
+      .select("calendar_day")
+      .eq("academic_year", course.academic_year)
+      .eq("hymn_id", 0)
+      .in("calendar_day", unmarkedDays);
+    if (breakError) {
+      return res.status(500).send(breakError.message);
+    }
+    const breakDays = new Set((breakRows || []).map((r) => r.calendar_day));
+    if (breakDays.size) {
+      rowsById.forEach((row, id) => {
+        if ((row.hymn_id === null || row.hymn_id === undefined) && breakDays.has(row.calendar_day)) {
+          rowsById.set(id, { ...row, hymn_id: 0, inferred_break: true });
+        }
+      });
+    }
+  }
+
   res.send(Array.from(rowsById.values()));
 });
 app.post("/copyDSCalendarToYear", async (req, res) => {

@@ -1,4 +1,4 @@
--- Deacon School manual registration requests.
+-- Hymns Schooll manual registration requests.
 -- Submitted from the public registration page when a DOB + last-name lookup
 -- finds no directory record. A coordinator later links each request to a
 -- portal profile (status -> 'linked') or rejects it (status -> 'rejected').
