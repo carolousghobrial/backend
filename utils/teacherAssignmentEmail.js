@@ -32,17 +32,25 @@ function formatDate(dateStr) {
  * @param {string} p.className - e.g. "Deacons School Level 3"
  * @param {string} p.role - "Hymn" | "Other" (rituals/memorization/altar/coptic)
  * @param {string} p.calendarDay - ISO date (yyyy-mm-dd) of the class
+ * @param {string} [p.contentName] - the specific hymn/lesson name, e.g. "Ⲁⲣⲓⲯⲁⲗⲓⲛ"
+ * @param {string} [p.contentUrl] - link to that hymn/lesson's page
  * @param {string} [p.scheduleUrl] - link to the login/schedule page
  */
-function renderTeacherAssignmentEmail({ firstName, className, role, calendarDay, scheduleUrl }) {
+function renderTeacherAssignmentEmail({ firstName, className, role, calendarDay, contentName, contentUrl, scheduleUrl }) {
   const name = escapeHtml(firstName);
   const cls = escapeHtml(className);
   const roleLabel = escapeHtml(role);
   const dateLabel = escapeHtml(formatDate(calendarDay));
   const link = escapeHtml(scheduleUrl || "https://www.stgeorgecocnashville.org/login");
+  const content = escapeHtml(contentName || "");
+  const hasContent = !!contentName;
 
-  const subject = `You're teaching ${className} on ${formatDate(calendarDay)}`;
-  const preheader = `${roleLabel} assignment for ${cls} — ${dateLabel}`;
+  const subject = hasContent
+    ? `You're teaching "${contentName}" for ${className} on ${formatDate(calendarDay)}`
+    : `You're teaching ${className} on ${formatDate(calendarDay)}`;
+  const preheader = hasContent
+    ? `${roleLabel}: ${content} — ${cls} — ${dateLabel}`
+    : `${roleLabel} assignment for ${cls} — ${dateLabel}`;
 
   const html = `<!doctype html>
 <html lang="en">
@@ -89,6 +97,26 @@ function renderTeacherAssignmentEmail({ firstName, className, role, calendarDay,
             </td>
           </tr>
 
+          ${hasContent ? `
+          <tr>
+            <td style="padding:0 32px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                style="background:${CREAM};border:1px dashed ${LINE};border-radius:10px;">
+                <tr>
+                  <td style="padding:14px 16px;font-size:15px;color:${INK};">
+                    <span style="color:${MUTED};font-size:12px;text-transform:uppercase;letter-spacing:.04em;">This week</span><br>
+                    <strong>${content}</strong>
+                    ${contentUrl ? `
+                    <br>
+                    <a href="${escapeHtml(contentUrl)}" target="_blank" style="color:${MAROON};font-size:14px;">
+                      View ${roleLabel === "Hymn" ? "hymn" : "lesson"} details &rarr;
+                    </a>` : ""}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>` : ""}
+
           <tr>
             <td align="center" style="padding:22px 32px 6px;">
               <a href="${link}" target="_blank"
@@ -122,7 +150,7 @@ function renderTeacherAssignmentEmail({ firstName, className, role, calendarDay,
   const text = `Hi ${firstName},
 
 You've been assigned to teach ${role} for ${className} on ${formatDate(calendarDay)}.
-
+${hasContent ? `\nThis week: ${contentName}${contentUrl ? `\nDetails: ${contentUrl}` : ""}\n` : ""}
 View your schedule: ${scheduleUrl || "https://www.stgeorgecocnashville.org/login"}
 
 If this assignment doesn't work for you, please contact your Deacons School coordinator.

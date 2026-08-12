@@ -45,23 +45,95 @@ const upload = multer({
  * doesn't re-send the email every time. Best-effort: failures are logged by
  * the caller, never surfaced to the coordinator's save request.
  */
+// Maps ds_calendar_week.others_tablename -> the frontend route that shows
+// that specific item. Rituals and Coptic lessons have no single-item page
+// yet, so they fall back to the class's general materials page.
+const PROD_SITE = "https://www.stgeorgecocnashville.org";
+const OTHERS_CONTENT_TYPE_BY_TABLE = {
+  ds_rituals_lesson_by_level: "ritual_lessons",
+  ritual_lessons: "ritual_lessons",
+  deacons_school_memorization: "memorization",
+  memorization: "memorization",
+  deacons_school_altar_responses: "altar_responses",
+  altar_responses: "altar_responses",
+  ds_coptic_lesson_by_level: "coptic_lessons",
+  coptic_lessons: "coptic_lessons",
+};
+
 async function notifyNewlyAssignedTeachers({ before, after, course_id, calendar_id }) {
   const ROLE_LABELS = { hymn_teacher_id: "Hymn", other_teacher_id: "Other (Rituals / Memorization / Coptic)" };
-  const newlyAssigned = []; // [{ teacher_id, role }]
+  const newlyAssigned = []; // [{ teacher_id, role, field }]
   for (const field of ["hymn_teacher_id", "other_teacher_id"]) {
     const prev = before?.[field] || null;
     const next = after?.[field] || null;
     if (next && next !== prev) {
-      newlyAssigned.push({ teacher_id: next, role: ROLE_LABELS[field] });
+      newlyAssigned.push({ teacher_id: next, role: ROLE_LABELS[field], field });
     }
   }
   if (newlyAssigned.length === 0) return;
 
   const [{ data: course }, { data: week }] = await Promise.all([
-    supabase.supabase.from("ds_courses").select("class_name").eq("course_id", course_id).maybeSingle(),
-    supabase.supabase.from("ds_calendar_week").select("calendar_day").eq("id", calendar_id).maybeSingle(),
+    supabase.supabase.from("ds_courses").select("class_name, level").eq("course_id", course_id).maybeSingle(),
+    supabase.supabase
+      .from("ds_calendar_week")
+      .select("calendar_day, hymn_id, others_id, others_tablename")
+      .eq("id", calendar_id)
+      .maybeSingle(),
   ]);
   if (!course || !week) return;
+
+  // Same extras source getCalendarByCurrentWeekAndCourse uses, for hymn names
+  // and "others" (ritual/altar/memorization/coptic) lesson names.
+  const { data: extrasData, error: extrasError } = await supabase.supabase.rpc(
+    "get_deacons_school_extras_by_level",
+    { level_param: course.level },
+  );
+  if (extrasError) {
+    console.error("Error fetching extras for teacher assignment email:", extrasError);
+  }
+  const extras = extrasData || {};
+  const hymnMap = new Map((extras.hymns || []).map((h) => [h.id, h]));
+
+  function resolveHymnContent() {
+    if (week.hymn_id === 0) return { name: "BREAK", url: null };
+    if (week.hymn_id === -1) return { name: "TEST Day", url: null };
+    if (week.hymn_id == null) return { name: null, url: null };
+    const hymn = hymnMap.get(week.hymn_id);
+    return {
+      name: hymn?.hymn_name || null,
+      url: hymn ? `${PROD_SITE}/deaconsSchool/hymn?id=${week.hymn_id}` : null,
+    };
+  }
+
+  function resolveOtherContent() {
+    if (!week.others_id || !week.others_tablename) return { name: null, url: null };
+    const tableName = week.others_tablename;
+    const type = OTHERS_CONTENT_TYPE_BY_TABLE[tableName] || tableName;
+
+    // The RPC keys its response by the raw table name (e.g.
+    // "deacons_school_memorization"), but callers may also pass the already-
+    // normalized short name -- try both, same as findOthersContent below.
+    const candidateKeys = [
+      tableName,
+      tableName.replace("ds_", "").replace("_lesson_by_level", "_lessons").replace("deacons_school_", ""),
+    ];
+    let items = [];
+    for (const key of candidateKeys) {
+      if (Array.isArray(extras[key])) {
+        items = extras[key];
+        break;
+      }
+    }
+    const item = items.find((i) => i.id === week.others_id);
+    const name = item?.title || item?.name || item?.response_name || null;
+
+    let url = null;
+    if (type === "altar_responses") url = `${PROD_SITE}/deaconsSchool/altarResponse?id=${week.others_id}`;
+    else if (type === "memorization") url = `${PROD_SITE}/deaconsSchool/memorization?id=${week.others_id}`;
+    else if (course.level) url = `${PROD_SITE}/deaconsSchoolLevel?level=${encodeURIComponent(course.level)}`;
+
+    return { name, url };
+  }
 
   const teacherIds = [...new Set(newlyAssigned.map((a) => a.teacher_id))];
   const { data: profiles } = await supabase.supabase
@@ -71,15 +143,19 @@ async function notifyNewlyAssignedTeachers({ before, after, course_id, calendar_
   const profileById = new Map((profiles || []).map((p) => [p.portal_id, p]));
 
   const emails = newlyAssigned
-    .map(({ teacher_id, role }) => {
+    .map(({ teacher_id, role, field }) => {
       const profile = profileById.get(teacher_id);
       if (!profile?.email) return null;
+      const { name: contentName, url: contentUrl } =
+        field === "hymn_teacher_id" ? resolveHymnContent() : resolveOtherContent();
       const rendered = renderTeacherAssignmentEmail({
         firstName: profile.first_name || "there",
         className: course.class_name,
         role,
         calendarDay: week.calendar_day,
-        scheduleUrl: "https://www.stgeorgecocnashville.org/login",
+        contentName,
+        contentUrl,
+        scheduleUrl: `${PROD_SITE}/login`,
       });
       return { to: profile.email, subject: rendered.subject, html: rendered.html, text: rendered.text };
     })
