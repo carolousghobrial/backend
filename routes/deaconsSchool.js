@@ -2175,7 +2175,8 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           email,
           cellphone,
           grade_level,
-          gender
+          gender,
+          family_id
         )`,
         { count: "exact" },
       )
@@ -2190,6 +2191,52 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
         success: false,
         error: error.message,
       });
+    }
+
+    // Students without their own cellphone on file fall back to a parent's
+    // number (mom first, then dad) looked up via shared family_id.
+    const familyIdsNeeded = [
+      ...new Set(
+        data
+          .filter((e) => !e.profiles.cellphone && e.profiles.family_id)
+          .map((e) => e.profiles.family_id),
+      ),
+    ];
+
+    const parentPhonesByFamily = {};
+    if (familyIdsNeeded.length > 0) {
+      const { data: parentRows, error: parentError } = await supabase.supabase
+        .from("profiles")
+        .select("family_id, cellphone, gender, family_role")
+        .in("family_id", familyIdsNeeded)
+        .not("cellphone", "is", null);
+
+      if (parentError) {
+        console.error("Error fetching parent phone fallback:", parentError);
+      } else {
+        parentRows.forEach((parent) => {
+          if (!parent.cellphone) return;
+          const role = (parent.family_role || "").toLowerCase();
+          const isMother =
+            role.includes("wife") ||
+            role.includes("mother") ||
+            (parent.gender || "").toLowerCase() === "female";
+          const isFather =
+            role.includes("head of household") ||
+            role.includes("husband") ||
+            role.includes("father") ||
+            (parent.gender || "").toLowerCase() === "male";
+          if (!isMother && !isFather) return; // skip children / unrelated roles
+
+          const existing = parentPhonesByFamily[parent.family_id];
+          if (!existing || (isMother && existing.source !== "mother")) {
+            parentPhonesByFamily[parent.family_id] = {
+              cellphone: parent.cellphone,
+              source: isMother ? "mother" : "father",
+            };
+          }
+        });
+      }
     }
 
     // Fetch profile images for each student
@@ -2219,12 +2266,23 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
           // Continue without image - don't fail the entire request
         }
 
+        let cellphone = enrollment.profiles.cellphone;
+        let cellphoneSource = cellphone ? "self" : null;
+        if (!cellphone && enrollment.profiles.family_id) {
+          const fallback = parentPhonesByFamily[enrollment.profiles.family_id];
+          if (fallback) {
+            cellphone = fallback.cellphone;
+            cellphoneSource = fallback.source;
+          }
+        }
+
         return {
           portal_id: enrollment.profiles.portal_id,
           first_name: enrollment.profiles.first_name || "",
           last_name: enrollment.profiles.last_name || "",
           email: enrollment.profiles.email,
-          cellphone: enrollment.profiles.cellphone,
+          cellphone,
+          cellphone_source: cellphoneSource,
           enrollment_id: enrollment.enrollment_id,
           is_active: enrollment.is_active,
           profile_pic: profileImageUrl,
