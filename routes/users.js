@@ -219,7 +219,7 @@ app.post("/login/phone/verify-otp", async (req, res) => {
   }
 });
 
-// ==================== Hymns SchoolL SELF-SERVICE SIGN-IN ====================
+// ==================== Hymns School SELF-SERVICE SIGN-IN ====================
 // Flow for people who don't know their login: identify them from the church
 // directory (`profiles`) by DOB + last name, then email a magic sign-in link
 // to the address on file. Login-less directory records get an account created
