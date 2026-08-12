@@ -5377,7 +5377,7 @@ app.get(
       const { data: enrollments, error: enrollErr } = await supabase.supabase
         .from("ds_student_enrollment")
         .select(
-          `student_id, course_id, ds_courses:course_id (course_id, class_name, level)`,
+          `student_id, course_id, enrolled_date, ds_courses:course_id (course_id, class_name, level)`,
         )
         .eq("academic_year", academicYear)
         .eq("is_active", true);
@@ -5435,7 +5435,7 @@ app.get(
           supabase.supabase
             .from("ds_student_enrollment")
             .select(
-              `student_id, is_active, payment_method, ds_courses:course_id (class_name)`,
+              `student_id, is_active, payment_method, enrolled_date, ds_courses:course_id (class_name)`,
             )
             .eq("academic_year", upcomingYear)
             .eq("is_active", true),
@@ -5491,6 +5491,7 @@ app.get(
           email: profile.email || "",
           has_email: !!profile.email,
           current_class_name: e.ds_courses?.class_name || "",
+          current_enrolled_date: e.enrolled_date || null,
           weighted_percentage: grade?.weighted_percentage ?? null,
           is_passing_year: grade?.is_passing_year ?? null,
           suggested_course_id: suggested.course_id,
@@ -5499,6 +5500,7 @@ app.get(
           already_registered: !!already,
           registered_class_name: already?.ds_courses?.class_name || null,
           registered_payment_method: already?.payment_method || null,
+          registered_date: already?.enrolled_date || null,
         };
       });
 
