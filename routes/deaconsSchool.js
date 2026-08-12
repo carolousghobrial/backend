@@ -999,16 +999,22 @@ app.get("/getMyCoursesTaught/:id", async (req, res) => {
 
   let targetYear = req.query.academic_year;
   if (!targetYear) {
-    const { data: currentYear } = await supabase.supabase
+    // is_current is NOT "the year that's open right now" -- its meaning
+    // flips at year-end rollover to mean the just-completed year (see the
+    // same reasoning documented in register-members / registration-requests
+    // / calendar). Use the open (not-yet-closed) year instead, same rule
+    // used everywhere else in the app.
+    const { data: years } = await supabase.supabase
       .from("ds_academic_years")
-      .select("year_label")
-      .eq("is_current", true)
-      .single();
-    targetYear = currentYear?.year_label;
+      .select("year_label, is_closed");
+    const open = (years || [])
+      .filter((y) => !y.is_closed)
+      .sort((a, b) => b.year_label.localeCompare(a.year_label))[0];
+    targetYear = open?.year_label;
   }
 
   if (!targetYear) {
-    // No current year configured -- fall back to unscoped rather than
+    // No open year configured -- fall back to unscoped rather than
     // silently hiding every course.
     return res.send(data);
   }
@@ -1105,13 +1111,65 @@ app.get("/getStudentCourses/:id", async (req, res) => {
       p_user_id: portal_id,
     },
   );
-  console.log(data);
-  console.log(error);
   if (error) {
-    res.status(500).send(error.message);
-  } else {
-    res.send(data);
+    return res.status(500).send(error.message);
   }
+
+  const rows = data || [];
+  const courseIds = [...new Set(rows.map((c) => c.course_id).filter(Boolean))];
+  if (courseIds.length === 0) {
+    return res.send(rows);
+  }
+
+  // The RPC returns every course the student has ever been enrolled in,
+  // across every academic year, and carries no academic_year of its own.
+  // Join back to ds_courses so callers can see the year and (by default)
+  // scope to the open one -- same pattern as getMyCoursesTaught.
+  const { data: courseRows, error: courseError } = await supabase.supabase
+    .from("ds_courses")
+    .select("course_id, class_name, level, academic_year")
+    .in("course_id", courseIds);
+  if (courseError) {
+    return res.status(500).send(courseError.message);
+  }
+
+  const byId = new Map((courseRows || []).map((c) => [c.course_id, c]));
+  const decorated = rows.map((r) => ({
+    ...r,
+    class_name: r.class_name || byId.get(r.course_id)?.class_name || "",
+    level: r.level || byId.get(r.course_id)?.level || "",
+    academic_year: byId.get(r.course_id)?.academic_year ?? null,
+  }));
+
+  // ?all=true -> full history (admin grade views, registration's "previous
+  // enrollment" lookup). Default is scoped to one year.
+  if (req.query.all === "true") {
+    return res.send(decorated);
+  }
+
+  let targetYear = req.query.academic_year;
+  if (!targetYear) {
+    // is_current is NOT "the year that's open right now" -- its meaning
+    // flips at year-end rollover. Use the open (not-yet-closed) year, same
+    // rule as getMyCoursesTaught / register-members / calendar.
+    const { data: years } = await supabase.supabase
+      .from("ds_academic_years")
+      .select("year_label, is_closed");
+    targetYear = (years || [])
+      .filter((y) => !y.is_closed)
+      .sort((a, b) => b.year_label.localeCompare(a.year_label))[0]?.year_label;
+  }
+
+  // No open year configured -- fall back to unscoped rather than silently
+  // hiding every course.
+  if (!targetYear) {
+    return res.send(decorated);
+  }
+
+  // Unlike getMyCoursesTaught, an empty scoped result here is a meaningful
+  // answer ("not enrolled this year") -- do NOT fall back to unscoped, the
+  // student dashboard's registration prompt depends on this being empty.
+  res.send(decorated.filter((r) => r.academic_year === targetYear));
 });
 app.get("/getMemorization", async (req, res) => {
   let { data: deacons_school_hymns, error } = await supabase.supabase
@@ -5924,31 +5982,121 @@ app.get("/getCalendarByLevelAndYear/:level/:academic_year", async (req, res) => 
 });
 app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
   const { course_id } = req.params;
-  console.log(course_id);
   try {
-    const { data, error } = await supabase.supabase.rpc(
-      "get_current_week_calendar_by_course",
-      {
-        p_course_id: course_id,
-      },
-    );
-    console.log(data);
-    const uniqueData = Array.from(
-      new Map(data.map((item) => [item.content_id, item])).values(),
-    );
-
-    console.log(uniqueData);
-    if (error) {
-      console.error("Database error:", error);
-      return res.status(500).json({
-        error: "Database query failed",
-        details: error.message,
-      });
+    // The old get_current_week_calendar_by_course RPC matches on
+    // ds_calendar_week.courses_id, which is unreliable -- it only gets
+    // stamped on save (see addDSCalendarForLevel) and has repeatedly turned
+    // up null on real rows for reasons that don't reproduce consistently.
+    // Resolve through level + academic_year instead, same as
+    // getCalendarByCourse, and rebuild the display fields (hymn_name /
+    // content_name / content_type) here rather than depending on the RPC's
+    // joins.
+    const { data: course, error: courseError } = await supabase.supabase
+      .from("ds_courses")
+      .select("level, academic_year")
+      .eq("course_id", course_id)
+      .maybeSingle();
+    if (courseError) {
+      return res.status(500).json({ error: courseError.message });
+    }
+    if (!course) {
+      return res.send([]);
     }
 
-    res.send(uniqueData);
+    // This week = the Sunday-Saturday range containing today, matching how
+    // classes are scheduled (one calendar_day per week per level).
+    const today = new Date();
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() - today.getDay());
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    const fmt = (d) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+    const { data: rows, error: rowsError } = await supabase.supabase
+      .from("ds_calendar_week")
+      .select("*")
+      .eq("level", course.level)
+      .eq("academic_year", course.academic_year)
+      .gte("calendar_day", fmt(startOfWeek))
+      .lte("calendar_day", fmt(endOfWeek));
+    if (rowsError) {
+      return res.status(500).json({ error: rowsError.message });
+    }
+    if (!rows || rows.length === 0) {
+      return res.send([]);
+    }
+
+    // Same extras source getdeaconsschoolextrasbycourse uses, for hymn
+    // names and "others" (ritual/altar/memorization/coptic) lesson names.
+    const { data: extrasData, error: extrasError } = await supabase.supabase.rpc(
+      "get_deacons_school_extras_by_level",
+      { level_param: course.level },
+    );
+    if (extrasError) {
+      console.error("Error fetching extras for current-week calendar:", extrasError);
+    }
+    const extras = extrasData || {};
+    const hymnMap = new Map((extras.hymns || []).map((h) => [h.id, h]));
+
+    const OTHERS_TYPE_BY_TABLE = {
+      ds_rituals_lesson_by_level: "ritual_lessons",
+      ritual_lessons: "ritual_lessons",
+      deacons_school_memorization: "memorization",
+      memorization: "memorization",
+      deacons_school_altar_responses: "altar_responses",
+      altar_responses: "altar_responses",
+      ds_coptic_lesson_by_level: "coptic_lessons",
+      coptic_lessons: "coptic_lessons",
+    };
+
+    function findOthersContent(othersId, tableName) {
+      if (!othersId || !tableName) return null;
+      const candidateKeys = [
+        tableName,
+        tableName.replace("ds_", "").replace("_lesson_by_level", "_lessons").replace("deacons_school_", ""),
+      ];
+      let items = [];
+      for (const key of candidateKeys) {
+        if (Array.isArray(extras[key])) {
+          items = extras[key];
+          break;
+        }
+      }
+      const item = items.find((i) => i.id === othersId);
+      if (!item) return null;
+      return {
+        id: item.id,
+        name: item.title || item.name || item.response_name || "",
+        type: OTHERS_TYPE_BY_TABLE[tableName] || tableName,
+      };
+    }
+
+    const enriched = rows.map((r) => {
+      let hymn_name = null;
+      if (r.hymn_id === 0) hymn_name = "BREAK";
+      else if (r.hymn_id === -1) hymn_name = "TEST Day";
+      else if (r.hymn_id != null) hymn_name = hymnMap.get(r.hymn_id)?.hymn_name || null;
+
+      const others = findOthersContent(r.others_id, r.others_tablename);
+
+      return {
+        week_num: r.week_num,
+        calendar_day: r.calendar_day,
+        hymn_id: r.hymn_id,
+        hymn_name,
+        others_id: r.others_id,
+        others_tablename: r.others_tablename,
+        content_id: others?.id ?? r.hymn_id,
+        content_name: others?.name ?? null,
+        content_type: others?.type ?? null,
+        teacher_id: null,
+      };
+    });
+
+    res.send(enriched);
   } catch (err) {
-    console.error("Server error:", err);
+    console.error("getCalendarByCurrentWeekAndCourse error:", err);
     res.status(500).json({
       error: "Internal server error",
       details: err.message,
