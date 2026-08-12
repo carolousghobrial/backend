@@ -145,6 +145,68 @@ const requireAnnouncementAdmin = requireRoles([...ANNOUNCEMENT_ADMIN_ROLES]);
 const requireServiceAdmin = requireRoles([...SERVICE_ADMIN_ROLES]);
 const requireDeaconsSchoolWrite = requireRoles([...DEACONS_SCHOOL_WRITE_ROLES]);
 
+// Nobody actually holds deacon_school_teacher/coordinator/principal as a real
+// row in user_service_roles -- that model is per-course via ds_course_teachers
+// instead (see requireTeacherAssignedToCourse below, and the
+// get_user_roles_and_services RPC the frontend uses to display roles). So a
+// plain requireDeaconsSchoolWrite (role-table-only) check blocks every
+// legitimately assigned teacher/coordinator who was only ever added via
+// ds_course_teachers. This variant accepts either: a real DEACONS_SCHOOL_WRITE_ROLES
+// row, OR any active ds_course_teachers assignment (to any course, any role) --
+// finer per-course/per-record authorization is left to the individual route.
+const requireDeaconsSchoolStaff = async (req, res, next) => {
+  try {
+    const portalId = await resolvePortalId(req);
+    if (!portalId) {
+      return res.status(403).json({
+        success: false,
+        message: "User profile is missing a portal ID",
+      });
+    }
+
+    const { error, roleIds } = await fetchUserRoleIds(portalId);
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to verify user roles",
+      });
+    }
+
+    if (roleIds.some((r) => DEACONS_SCHOOL_WRITE_ROLES.has(r))) {
+      req.authRoleIds = roleIds;
+      return next();
+    }
+
+    const { data, error: assignError } = await supabase.supabase
+      .from("ds_course_teachers")
+      .select("teacher_id")
+      .eq("teacher_id", portalId)
+      .eq("is_active", true)
+      .limit(1)
+      .maybeSingle();
+    if (assignError) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to verify course assignment",
+      });
+    }
+    if (!data) {
+      return res.status(403).json({
+        success: false,
+        message: "Insufficient permissions",
+      });
+    }
+
+    req.authRoleIds = roleIds;
+    next();
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Authorization check failed",
+    });
+  }
+};
+
 // Roles that can act on any course without being assigned to it
 const PRIVILEGED_DS_ROLES = new Set([
   "priest",
@@ -350,6 +412,7 @@ module.exports = {
   requireAnnouncementAdmin,
   requireServiceAdmin,
   requireDeaconsSchoolWrite,
+  requireDeaconsSchoolStaff,
   requirePortalMatchOrRoles,
   requireParamPortalMatchOrRoles,
   requirePortalMatchOrPrivileged,

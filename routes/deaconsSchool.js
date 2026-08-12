@@ -10,6 +10,7 @@ const supabase = require("../config/config");
 const {
   authenticateToken,
   requireDeaconsSchoolWrite,
+  requireDeaconsSchoolStaff,
   requireTeacherAssignedToCourse,
   requireTeacherAssignedToCourseForBatch,
 } = require("../middleware/auth");
@@ -18,6 +19,8 @@ const {
   decideNextBracket,
   resolveCourse,
 } = require("../utils/promotionRules");
+const { sendEmails } = require("../utils/emailSender");
+const { renderTeacherAssignmentEmail } = require("../utils/teacherAssignmentEmail");
 
 // ── Stripe (re-enrollment fee) ────────────────────────────────────────────────
 const REENROLLMENT_FEE_CENTS = 2500; // $25.00
@@ -33,6 +36,61 @@ const upload = multer({
   storage: storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
+
+// ─── Teacher-assignment email notification ───────────────────────────────────
+/**
+ * Emails anyone newly placed in hymn_teacher_id/other_teacher_id by a
+ * saveTeacherAssignments upsert. "Newly" = the slot's teacher changed from
+ * what it was before the save, so a coordinator re-saving the same teacher
+ * doesn't re-send the email every time. Best-effort: failures are logged by
+ * the caller, never surfaced to the coordinator's save request.
+ */
+async function notifyNewlyAssignedTeachers({ before, after, course_id, calendar_id }) {
+  const ROLE_LABELS = { hymn_teacher_id: "Hymn", other_teacher_id: "Other (Rituals / Memorization / Coptic)" };
+  const newlyAssigned = []; // [{ teacher_id, role }]
+  for (const field of ["hymn_teacher_id", "other_teacher_id"]) {
+    const prev = before?.[field] || null;
+    const next = after?.[field] || null;
+    if (next && next !== prev) {
+      newlyAssigned.push({ teacher_id: next, role: ROLE_LABELS[field] });
+    }
+  }
+  if (newlyAssigned.length === 0) return;
+
+  const [{ data: course }, { data: week }] = await Promise.all([
+    supabase.supabase.from("ds_courses").select("class_name").eq("course_id", course_id).maybeSingle(),
+    supabase.supabase.from("ds_calendar_week").select("calendar_day").eq("id", calendar_id).maybeSingle(),
+  ]);
+  if (!course || !week) return;
+
+  const teacherIds = [...new Set(newlyAssigned.map((a) => a.teacher_id))];
+  const { data: profiles } = await supabase.supabase
+    .from("profiles")
+    .select("portal_id, first_name, email")
+    .in("portal_id", teacherIds);
+  const profileById = new Map((profiles || []).map((p) => [p.portal_id, p]));
+
+  const emails = newlyAssigned
+    .map(({ teacher_id, role }) => {
+      const profile = profileById.get(teacher_id);
+      if (!profile?.email) return null;
+      const rendered = renderTeacherAssignmentEmail({
+        firstName: profile.first_name || "there",
+        className: course.class_name,
+        role,
+        calendarDay: week.calendar_day,
+        scheduleUrl: "https://www.stgeorgecocnashville.org/login",
+      });
+      return { to: profile.email, subject: rendered.subject, html: rendered.html, text: rendered.text };
+    })
+    .filter(Boolean);
+  if (emails.length === 0) return;
+
+  const result = await sendEmails(emails);
+  if (!result.ok) {
+    console.error("Teacher assignment email send failed:", JSON.stringify(result.body));
+  }
+}
 
 // ─── Storage helpers ──────────────────────────────────────────────────────────
 function extractStoragePath(publicUrl, bucketName) {
@@ -114,7 +172,7 @@ app.use((req, res, next) => {
   }
 
   return authenticateToken(req, res, () => {
-    return requireDeaconsSchoolWrite(req, res, next);
+    return requireDeaconsSchoolStaff(req, res, next);
   });
 });
 
@@ -1827,6 +1885,15 @@ app.post("/saveTeacherAssignments", async (req, res) => {
       });
     }
 
+    // Read the pre-save state so we know who's *newly* assigned afterward —
+    // re-saving the same teacher shouldn't re-email them every time.
+    const { data: before } = await supabase.supabase
+      .from("ds_calendar_teacher_assignments")
+      .select("hymn_teacher_id, other_teacher_id")
+      .eq("calendar_id", assignmentData.calendar_id)
+      .eq("course_id", assignmentData.course_id)
+      .maybeSingle();
+
     const { data, error } = await supabase.supabase
       .from("ds_calendar_teacher_assignments")
       .upsert(
@@ -1846,6 +1913,15 @@ app.post("/saveTeacherAssignments", async (req, res) => {
         error: error.message,
       });
     }
+
+    notifyNewlyAssignedTeachers({
+      before,
+      after: assignmentData,
+      course_id: assignmentData.course_id,
+      calendar_id: assignmentData.calendar_id,
+    }).catch((err) =>
+      console.error("notifyNewlyAssignedTeachers failed:", err.message),
+    );
 
     return res.json({
       success: true,
@@ -6159,6 +6235,122 @@ app.get("/getCalendarByCurrentWeekAndCourse/:course_id", async (req, res) => {
       error: "Internal server error",
       details: err.message,
     });
+  }
+});
+
+/**
+ * GET /myTeachingThisWeek/:portal_id
+ * "Are you teaching this week?" dashboard banner. Looks at every active
+ * course this portal_id is assigned to (ds_course_teachers), finds this
+ * week's calendar_week row for each course's level/academic_year (same
+ * Sunday-Saturday window as getCalendarByCurrentWeekAndCourse), and reports
+ * back which of those the person is actually on the hook for in
+ * ds_calendar_teacher_assignments.
+ */
+app.get("/myTeachingThisWeek/:portal_id", async (req, res) => {
+  const { portal_id } = req.params;
+  try {
+    const { data: teacherRows, error: teacherError } = await supabase.supabase
+      .from("ds_course_teachers")
+      .select("course_id")
+      .eq("teacher_id", portal_id)
+      .eq("is_active", true);
+    if (teacherError) {
+      return res.status(500).json({ success: false, error: teacherError.message });
+    }
+    const courseIds = [...new Set((teacherRows || []).map((r) => r.course_id))];
+    if (courseIds.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const { data: courses, error: coursesError } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id, class_name, level, academic_year")
+      .in("course_id", courseIds);
+    if (coursesError) {
+      return res.status(500).json({ success: false, error: coursesError.message });
+    }
+
+    // Same Sunday-Saturday "this week" window as getCalendarByCurrentWeekAndCourse.
+    const today = new Date();
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() - today.getDay());
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    const fmt = (d) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+    const levelYearPairs = [
+      ...new Map((courses || []).map((c) => [`${c.level}::${c.academic_year}`, c])).values(),
+    ];
+    if (levelYearPairs.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const { data: weekRows, error: weekError } = await supabase.supabase
+      .from("ds_calendar_week")
+      .select("id, level, academic_year, calendar_day, week_num")
+      .in("level", levelYearPairs.map((c) => c.level))
+      .in("academic_year", levelYearPairs.map((c) => c.academic_year))
+      .gte("calendar_day", fmt(startOfWeek))
+      .lte("calendar_day", fmt(endOfWeek));
+    if (weekError) {
+      return res.status(500).json({ success: false, error: weekError.message });
+    }
+    if (!weekRows || weekRows.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // course_id -> this week's calendar_week row for that course's level/year
+    const weekByLevelYear = new Map(weekRows.map((w) => [`${w.level}::${w.academic_year}`, w]));
+    const courseWeek = (courses || [])
+      .map((c) => ({ course: c, week: weekByLevelYear.get(`${c.level}::${c.academic_year}`) }))
+      .filter((x) => x.week);
+    if (courseWeek.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const calendarIds = [...new Set(courseWeek.map((x) => x.week.id))];
+    const { data: assignments, error: assignError } = await supabase.supabase
+      .from("ds_calendar_teacher_assignments")
+      .select("calendar_id, course_id, hymn_teacher_id, other_teacher_id")
+      .in("calendar_id", calendarIds)
+      .in("course_id", courseIds)
+      .or(`hymn_teacher_id.eq.${portal_id},other_teacher_id.eq.${portal_id}`);
+    if (assignError) {
+      return res.status(500).json({ success: false, error: assignError.message });
+    }
+
+    const results = [];
+    for (const a of assignments || []) {
+      const match = courseWeek.find(
+        (x) => x.course.course_id === a.course_id && x.week.id === a.calendar_id,
+      );
+      if (!match) continue;
+      if (a.hymn_teacher_id === portal_id) {
+        results.push({
+          course_id: match.course.course_id,
+          class_name: match.course.class_name,
+          calendar_day: match.week.calendar_day,
+          week_num: match.week.week_num,
+          role: "Hymn",
+        });
+      }
+      if (a.other_teacher_id === portal_id) {
+        results.push({
+          course_id: match.course.course_id,
+          class_name: match.course.class_name,
+          calendar_day: match.week.calendar_day,
+          week_num: match.week.week_num,
+          role: "Other (Rituals / Memorization / Coptic)",
+        });
+      }
+    }
+
+    res.json({ success: true, data: results });
+  } catch (err) {
+    console.error("myTeachingThisWeek error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
