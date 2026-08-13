@@ -865,6 +865,131 @@ app.get("/getCourses", async (req, res) => {
 
   res.send(deacons_school_hymns);
 });
+
+/**
+ * GET /courseComparison?academic_year=YYYY-YYYY
+ * Side-by-side stats for every active course in a year: how many students,
+ * their average final grade, average student attendance, and average
+ * teacher attendance. Defaults to the open (not-closed) academic year, same
+ * rule used everywhere else in the app. Also returns a "combined" summary
+ * across every class shown.
+ */
+app.get("/courseComparison", async (req, res) => {
+  try {
+    let targetYear = req.query.academic_year;
+    if (!targetYear) {
+      const { data: years, error: yearsError } = await supabase.supabase
+        .from("ds_academic_years")
+        .select("year_label, is_closed");
+      if (yearsError) {
+        return res.status(500).json({ success: false, error: yearsError.message });
+      }
+      const open = (years || [])
+        .filter((y) => !y.is_closed)
+        .sort((a, b) => b.year_label.localeCompare(a.year_label))[0];
+      targetYear = open?.year_label;
+    }
+    if (!targetYear) {
+      return res.json({ success: true, data: [], combined: null, academic_year: null });
+    }
+
+    const { data: courses, error: coursesError } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id, class_name, level")
+      .eq("academic_year", targetYear)
+      .eq("is_active", true);
+    if (coursesError) {
+      return res.status(500).json({ success: false, error: coursesError.message });
+    }
+    const courseIds = (courses || []).map((c) => c.course_id);
+    if (courseIds.length === 0) {
+      return res.json({ success: true, data: [], combined: null, academic_year: targetYear });
+    }
+
+    const [
+      { data: enrollments, error: enrollErr },
+      { data: grades, error: gradesErr },
+      { data: attendance, error: attErr },
+      { data: teacherAttendance, error: teachAttErr },
+    ] = await Promise.all([
+      supabase.supabase
+        .from("ds_student_enrollment")
+        .select("student_id, course_id")
+        .in("course_id", courseIds)
+        .eq("is_active", true),
+      supabase.supabase
+        .from("ds_student_final_grades")
+        .select("course_id, weighted_percentage")
+        .in("course_id", courseIds)
+        .eq("academic_year", targetYear),
+      supabase.supabase.from("ds_attendance").select("course_id, present").in("course_id", courseIds),
+      supabase.supabase.from("ds_teacher_attendance").select("course_id, present").in("course_id", courseIds),
+    ]);
+    const firstError = enrollErr || gradesErr || attErr || teachAttErr;
+    if (firstError) {
+      return res.status(500).json({ success: false, error: firstError.message });
+    }
+
+    const studentCountByCourse = {};
+    (enrollments || []).forEach((e) => {
+      studentCountByCourse[e.course_id] = (studentCountByCourse[e.course_id] || 0) + 1;
+    });
+
+    const gradesByCourse = {};
+    (grades || []).forEach((g) => {
+      if (g.weighted_percentage == null) return;
+      (gradesByCourse[g.course_id] ||= []).push(g.weighted_percentage);
+    });
+
+    const bucketByCourse = (rows) => {
+      const map = {};
+      (rows || []).forEach((r) => {
+        const b = (map[r.course_id] ||= { present: 0, total: 0 });
+        b.total++;
+        if (r.present) b.present++;
+      });
+      return map;
+    };
+    const attByCourse = bucketByCourse(attendance);
+    const teachAttByCourse = bucketByCourse(teacherAttendance);
+
+    const avg = (arr) => (arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null);
+    const pct = (b) => (b && b.total ? (b.present / b.total) * 100 : null);
+
+    const rows = courses
+      .map((c) => ({
+        course_id: c.course_id,
+        class_name: c.class_name,
+        level: c.level,
+        student_count: studentCountByCourse[c.course_id] || 0,
+        avg_grade: avg(gradesByCourse[c.course_id] || []),
+        avg_attendance: pct(attByCourse[c.course_id]),
+        avg_teacher_attendance: pct(teachAttByCourse[c.course_id]),
+      }))
+      .sort((a, b) => a.class_name.localeCompare(b.class_name));
+
+    const combinedAttendance = Object.values(attByCourse).reduce(
+      (acc, b) => ({ present: acc.present + b.present, total: acc.total + b.total }),
+      { present: 0, total: 0 },
+    );
+    const combinedTeacherAttendance = Object.values(teachAttByCourse).reduce(
+      (acc, b) => ({ present: acc.present + b.present, total: acc.total + b.total }),
+      { present: 0, total: 0 },
+    );
+    const combined = {
+      class_count: rows.length,
+      student_count: new Set((enrollments || []).map((e) => e.student_id)).size,
+      avg_grade: avg(Object.values(gradesByCourse).flat()),
+      avg_attendance: pct(combinedAttendance),
+      avg_teacher_attendance: pct(combinedTeacherAttendance),
+    };
+
+    res.json({ success: true, data: rows, combined, academic_year: targetYear });
+  } catch (err) {
+    console.error("courseComparison error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
 app.put(
   "/updateHymn/:id",
   upload.fields([
