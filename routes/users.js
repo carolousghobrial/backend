@@ -539,6 +539,129 @@ app.post("/login/ds/claim-profile", authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * Admin/coordinator action: give a login-less directory profile (identified
+ * by portal_id) a real login at a new email, and connect that login to the
+ * SAME portal_id -- same safe reconcile pattern as /login/ds/claim-profile
+ * (never deletes rows, releases the portal_id from the old row before
+ * attaching it to the new auth-linked row). A random password is generated
+ * server-side and never returned to the client; the new owner sets their own
+ * password via the standard password-reset email.
+ */
+app.post("/users/create-login-for-portal", authenticateToken, async (req, res) => {
+  try {
+    const { portal_id, email } = req.body || {};
+
+    if (!portal_id || !email) {
+      return res.status(400).json({
+        success: false,
+        message: "portal_id and email are required",
+      });
+    }
+
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    const normalizedEmail = String(email).toLowerCase().trim();
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid email address",
+      });
+    }
+
+    const { data: dirRows, error: dirErr } = await supabase.supabase
+      .from("profiles")
+      .select("*")
+      .eq("portal_id", portal_id);
+    if (dirErr) {
+      return res.status(500).json({ success: false, message: dirErr.message });
+    }
+    const directoryProfile = (dirRows || [])[0] || null;
+    if (!directoryProfile) {
+      return res.status(404).json({
+        success: false,
+        message: "No profile found for that portal_id",
+      });
+    }
+
+    const identity = {
+      portal_id: directoryProfile.portal_id,
+      first_name: directoryProfile.first_name,
+      last_name: directoryProfile.last_name,
+      dob: directoryProfile.dob,
+      cellphone: directoryProfile.cellphone,
+      shirt_size: directoryProfile.shirt_size,
+      family_id: directoryProfile.family_id,
+      family_role: directoryProfile.family_role,
+      grade_level: directoryProfile.grade_level,
+      gender: directoryProfile.gender,
+      email: normalizedEmail,
+    };
+
+    // Generate a random password the caller never sees -- the new owner sets
+    // their own via the password-reset email sent below.
+    const tempPassword = require("crypto").randomBytes(24).toString("base64");
+
+    const { data: authData, error: authError } =
+      await supabase.supabase.auth.admin.createUser({
+        email: normalizedEmail,
+        password: tempPassword,
+        email_confirm: true,
+        user_metadata: { portal_id: directoryProfile.portal_id },
+      });
+
+    if (authError) {
+      if ((authError.message || "").toLowerCase().includes("already")) {
+        return res.status(409).json({
+          success: false,
+          message: "An account with that email already exists.",
+        });
+      }
+      return res.status(400).json({ success: false, message: authError.message });
+    }
+
+    const authId = authData.user.id;
+
+    // Release the portal_id from the old login-less row first so the unique
+    // identity moves cleanly to the new auth-linked profile.
+    await supabase.supabase
+      .from("profiles")
+      .update({ portal_id: null })
+      .eq("id", directoryProfile.id);
+
+    // The trigger that runs on auth-user creation may have already inserted a
+    // bare profiles row for this new id -- update it if so, otherwise insert.
+    const { data: authRows } = await supabase.supabase
+      .from("profiles")
+      .select("id")
+      .eq("id", authId);
+
+    if (authRows && authRows.length > 0) {
+      await supabase.supabase.from("profiles").update(identity).eq("id", authId);
+    } else {
+      await supabase.supabase.from("profiles").insert([{ id: authId, ...identity }]);
+    }
+
+    // Let the new owner set their own password.
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://www.stgeorgecocnashville.org";
+    await supabase.supabase.auth.resetPasswordForEmail(normalizedEmail, {
+      redirectTo: `${frontendUrl}/reset-password`,
+    });
+
+    return res.json({
+      success: true,
+      message: `Account created for ${normalizedEmail}. A password-setup email has been sent.`,
+      portal_id: directoryProfile.portal_id,
+    });
+  } catch (err) {
+    console.error("create-login-for-portal error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Could not create the account.",
+    });
+  }
+});
+
 // ==================== PASSWORDLESS (MAGIC LINK) LOGIN ====================
 
 /**
