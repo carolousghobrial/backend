@@ -5560,7 +5560,7 @@ app.get(
           supabase.supabase
             .from("ds_student_enrollment")
             .select(
-              `student_id, is_active, payment_method, enrolled_date, ds_courses:course_id (class_name)`,
+              `student_id, course_id, is_active, payment_method, enrolled_date, ds_courses:course_id (class_name)`,
             )
             .eq("academic_year", upcomingYear)
             .eq("is_active", true),
@@ -5623,6 +5623,7 @@ app.get(
           suggested_class_name: suggested.class_name,
           suggested_reason: suggested.reason,
           already_registered: !!already,
+          registered_course_id: already?.course_id || null,
           registered_class_name: already?.ds_courses?.class_name || null,
           registered_payment_method: already?.payment_method || null,
           registered_date: already?.enrolled_date || null,
@@ -6013,6 +6014,74 @@ app.post("/registration/enroll-manual", async (req, res) => {
     });
   } catch (err) {
     console.error("enroll-manual error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// POST /registration/change-course
+// Moves an already-enrolled member's ACTIVE enrollment to a different course
+// within the same academic year (e.g. the coordinator placed them in the
+// wrong section during bulk re-registration). Body: { student_id, course_id }.
+app.post("/registration/change-course", async (req, res) => {
+  try {
+    const { student_id, course_id } = req.body || {};
+
+    if (!student_id || !course_id) {
+      return res.status(400).json({
+        success: false,
+        error: "student_id and course_id are required",
+      });
+    }
+
+    const { data: newCourse, error: courseErr } = await supabase.supabase
+      .from("ds_courses")
+      .select("academic_year, class_name")
+      .eq("course_id", course_id)
+      .single();
+    if (courseErr || !newCourse) {
+      return res.status(404).json({ success: false, error: "Course not found" });
+    }
+
+    const { data: activeEnrollment, error: enrollErr } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .select("enrollment_id, course_id, academic_year")
+      .eq("student_id", student_id)
+      .eq("academic_year", newCourse.academic_year)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (enrollErr) {
+      return res.status(500).json({ success: false, error: enrollErr.message });
+    }
+    if (!activeEnrollment) {
+      return res.status(404).json({
+        success: false,
+        error: `This member has no active enrollment for the ${newCourse.academic_year} year to move.`,
+      });
+    }
+    if (activeEnrollment.course_id === course_id) {
+      return res.status(409).json({
+        success: false,
+        error: `Already enrolled in ${newCourse.class_name}.`,
+      });
+    }
+
+    const { data, error } = await supabase.supabase
+      .from("ds_student_enrollment")
+      .update({ course_id })
+      .eq("enrollment_id", activeEnrollment.enrollment_id)
+      .select()
+      .single();
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({
+      success: true,
+      message: `Moved to ${newCourse.class_name}.`,
+      data,
+    });
+  } catch (err) {
+    console.error("registration/change-course error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
