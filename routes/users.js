@@ -1765,7 +1765,7 @@ app.get("/getUserByPortal/:portal_id", async (req, res) => {
 app.post("/updateUser/:portal_id", authenticateToken, async (req, res) => {
   try {
     const { portal_id } = req.params;
-    const { first_name, last_name, dob, cellphone, email, shirt_size } =
+    const { first_name, last_name, dob, cellphone, email, shirt_size, address } =
       req.body;
 
     const updateData = {
@@ -1774,6 +1774,7 @@ app.post("/updateUser/:portal_id", authenticateToken, async (req, res) => {
       cellphone,
       email,
       shirt_size,
+      address,
     };
 
     if (dob) {
