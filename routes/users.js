@@ -548,7 +548,7 @@ app.post("/login/ds/claim-profile", authenticateToken, async (req, res) => {
  * server-side and never returned to the client; the new owner sets their own
  * password via the standard password-reset email.
  */
-app.post("/users/create-login-for-portal", authenticateToken, async (req, res) => {
+app.post("/create-login-for-portal", authenticateToken, async (req, res) => {
   try {
     const { portal_id, email } = req.body || {};
 
