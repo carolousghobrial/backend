@@ -2516,58 +2516,37 @@ app.get("/getStudentsByCourse/:courseId", async (req, res) => {
       }
     }
 
-    // Fetch profile images for each student
-    const studentsWithImages = await Promise.all(
-      data.map(async (enrollment) => {
-        let profileImageUrl = null;
-
-        try {
-          // Using built-in fetch (Node.js 18+)
-          const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`,
-          );
-
-          if (imageResponse.ok) {
-            // Convert to base64 or get the blob URL
-            const imageBuffer = await imageResponse.arrayBuffer();
-            const base64Image = Buffer.from(imageBuffer).toString("base64");
-            profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type",
-            )};base64,${base64Image}`;
-          }
-        } catch (imageError) {
-          console.warn(
-            `Failed to fetch image for portal_id ${enrollment.profiles.portal_id}:`,
-            imageError.message,
-          );
-          // Continue without image - don't fail the entire request
+    // Profile pictures are served directly from the external host as a plain
+    // URL -- the browser's <img> tag loads them in parallel and caches them.
+    // (Previously this fetched + base64-embedded every student's image here,
+    // one HTTP round-trip per student, which routinely pushed this endpoint
+    // past the serverless function timeout for any class with more than a
+    // handful of students -- the actual cause of "takes forever to load".)
+    const studentsWithImages = data.map((enrollment) => {
+      let cellphone = enrollment.profiles.cellphone;
+      let cellphoneSource = cellphone ? "self" : null;
+      if (!cellphone && enrollment.profiles.family_id) {
+        const fallback = parentPhonesByFamily[enrollment.profiles.family_id];
+        if (fallback) {
+          cellphone = fallback.cellphone;
+          cellphoneSource = fallback.source;
         }
+      }
 
-        let cellphone = enrollment.profiles.cellphone;
-        let cellphoneSource = cellphone ? "self" : null;
-        if (!cellphone && enrollment.profiles.family_id) {
-          const fallback = parentPhonesByFamily[enrollment.profiles.family_id];
-          if (fallback) {
-            cellphone = fallback.cellphone;
-            cellphoneSource = fallback.source;
-          }
-        }
-
-        return {
-          portal_id: enrollment.profiles.portal_id,
-          first_name: enrollment.profiles.first_name || "",
-          last_name: enrollment.profiles.last_name || "",
-          email: enrollment.profiles.email,
-          cellphone,
-          cellphone_source: cellphoneSource,
-          enrollment_id: enrollment.enrollment_id,
-          is_active: enrollment.is_active,
-          profile_pic: profileImageUrl,
-          grade_level: enrollment.profiles.grade_level || null,
-          gender: enrollment.profiles.gender || null,
-        };
-      }),
-    );
+      return {
+        portal_id: enrollment.profiles.portal_id,
+        first_name: enrollment.profiles.first_name || "",
+        last_name: enrollment.profiles.last_name || "",
+        email: enrollment.profiles.email,
+        cellphone,
+        cellphone_source: cellphoneSource,
+        enrollment_id: enrollment.enrollment_id,
+        is_active: enrollment.is_active,
+        profile_pic: `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`,
+        grade_level: enrollment.profiles.grade_level || null,
+        gender: enrollment.profiles.gender || null,
+      };
+    });
 
     res.json({
       success: true,
@@ -2624,142 +2603,18 @@ app.get("/getTeachersByCourse/:courseId", async (req, res) => {
       });
     }
 
-    // Fetch profile images for each student
-    const studentsWithImages = await Promise.all(
-      data.map(async (enrollment) => {
-        let profileImageUrl = null;
-
-        try {
-          // Using built-in fetch (Node.js 18+)
-          const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`,
-          );
-
-          if (imageResponse.ok) {
-            // Convert to base64 or get the blob URL
-            const imageBuffer = await imageResponse.arrayBuffer();
-            const base64Image = Buffer.from(imageBuffer).toString("base64");
-            profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type",
-            )};base64,${base64Image}`;
-          }
-        } catch (imageError) {
-          console.warn(
-            `Failed to fetch image for portal_id ${enrollment.profiles.portal_id}:`,
-            imageError.message,
-          );
-          // Continue without image - don't fail the entire request
-        }
-
-        return {
-          portal_id: enrollment.profiles.portal_id,
-          first_name: enrollment.profiles.first_name || "",
-          last_name: enrollment.profiles.last_name || "",
-          email: enrollment.profiles.email,
-          cellphone: enrollment.profiles.cellphone,
-          enrollment_id: enrollment.enrollment_id,
-          is_active: enrollment.is_active,
-          profile_pic: profileImageUrl,
-        };
-      }),
-    );
-
-    res.json({
-      success: true,
-      data: studentsWithImages,
-      count: studentsWithImages.length,
-    });
-  } catch (error) {
-    console.error("Get students by course error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-    });
-  }
-});
-
-// Alternative implementation using axios (if you prefer)
-// First install: npm install axios
-
-const axios = require("axios");
-
-app.get("/getStudentsByCourse/:courseId", async (req, res) => {
-  try {
-    const { courseId } = req.params;
-
-    if (!courseId) {
-      return res.status(400).json({
-        success: false,
-        error: "Course ID is required",
-      });
-    }
-
-    const { data, error } = await supabase.supabase
-      .from("ds_student_enrollment")
-      .select(
-        `course_id,
-        is_active,
-        role,
-        profiles:student_id (
-          portal_id,
-          first_name,
-          last_name,
-          email,
-          cellphone,
-          grade_level,
-          gender
-        )`,
-      )
-      .eq("course_id", courseId)
-      .eq("is_active", true)
-      .order("profiles(first_name)", { ascending: true });
-
-    if (error) {
-      console.error("Error fetching students:", error);
-      return res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
-
-    // Fetch profile images for each student using axios
-    const studentsWithImages = await Promise.all(
-      data.map(async (enrollment) => {
-        let profileImageUrl = null;
-
-        try {
-          const imageResponse = await axios.get(
-            `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`,
-            { responseType: "arraybuffer" },
-          );
-
-          const base64Image = Buffer.from(imageResponse.data).toString(
-            "base64",
-          );
-          const contentType =
-            imageResponse.headers["content-type"] || "image/jpeg";
-          profileImageUrl = `data:${contentType};base64,${base64Image}`;
-        } catch (imageError) {
-          console.warn(
-            `Failed to fetch image for portal_id ${enrollment.profiles.portal_id}:`,
-            imageError.message,
-          );
-        }
-
-        return {
-          portal_id: enrollment.profiles.portal_id,
-          first_name: enrollment.profiles.first_name || "",
-          last_name: enrollment.profiles.last_name || "",
-          email: enrollment.profiles.email,
-          cellphone: enrollment.profiles.cellphone,
-          enrollment_id: enrollment.enrollment_id,
-          is_active: enrollment.is_active,
-          profile_pic: profileImageUrl,
-          grade_level: enrollment.profiles.grade_level || null,
-          gender: enrollment.profiles.gender || null,
-        };
-      }),
-    );
+    // See the matching note in /getStudentsByCourse above -- serve the plain
+    // image URL instead of fetching + base64-embedding it here.
+    const studentsWithImages = data.map((enrollment) => ({
+      portal_id: enrollment.profiles.portal_id,
+      first_name: enrollment.profiles.first_name || "",
+      last_name: enrollment.profiles.last_name || "",
+      email: enrollment.profiles.email,
+      cellphone: enrollment.profiles.cellphone,
+      enrollment_id: enrollment.enrollment_id,
+      is_active: enrollment.is_active,
+      profile_pic: `https://api.suscopts.org/image/${enrollment.profiles.portal_id}`,
+    }));
 
     res.json({
       success: true,

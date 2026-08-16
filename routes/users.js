@@ -1318,40 +1318,21 @@ app.get("/getLoggedIn", authenticateToken, async (req, res) => {
       });
     }
 
-    // Fetch profile images
-    const profilesWithImages = await Promise.all(
-      profiles.map(async (profile) => {
-        let profileImageUrl = null;
-
-        try {
-          const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${profile.portal_id}`,
-          );
-
-          if (imageResponse.ok) {
-            const imageBuffer = await imageResponse.arrayBuffer();
-            const base64Image = Buffer.from(imageBuffer).toString("base64");
-            profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type",
-            )};base64,${base64Image}`;
-          }
-        } catch (imageError) {
-          console.warn(`Failed to fetch image for ${profile.portal_id}`);
-        }
-
-        return {
-          id: profile.id,
-          portal_id: profile.portal_id,
-          first_name: profile.first_name || "",
-          last_name: profile.last_name || "",
-          email: profile.email,
-          cellphone: profile.cellphone,
-          family_id: profile.family_id,
-          family_role: profile.family_role,
-          profile_pic: profileImageUrl,
-        };
-      }),
-    );
+    // Served as a plain URL -- the browser's <img> tag loads these directly
+    // and in parallel, instead of this endpoint fetching + base64-embedding
+    // every family member's image itself (one external round-trip per
+    // member, serially blocking the whole dashboard load).
+    const profilesWithImages = profiles.map((profile) => ({
+      id: profile.id,
+      portal_id: profile.portal_id,
+      first_name: profile.first_name || "",
+      last_name: profile.last_name || "",
+      email: profile.email,
+      cellphone: profile.cellphone,
+      family_id: profile.family_id,
+      family_role: profile.family_role,
+      profile_pic: `https://api.suscopts.org/image/${profile.portal_id}`,
+    }));
 
     res.json({
       success: true,
@@ -1478,27 +1459,9 @@ app.get("/getParentChildren", authenticateToken, async (req, res) => {
       return true;
     });
 
-    // Fetch profile images
-    const childrenWithImages = await Promise.all(
-      childrenUnder18.map(async (child) => {
-        let profileImageUrl = null;
-
-        try {
-          const imageResponse = await fetch(
-            `https://api.suscopts.org/image/${child.portal_id}`,
-          );
-
-          if (imageResponse.ok) {
-            const imageBuffer = await imageResponse.arrayBuffer();
-            const base64Image = Buffer.from(imageBuffer).toString("base64");
-            profileImageUrl = `data:${imageResponse.headers.get(
-              "content-type",
-            )};base64,${base64Image}`;
-          }
-        } catch (imageError) {
-          // Ignore image fetch errors
-        }
-
+    // Served as a plain URL rather than fetched + base64-embedded here --
+    // see the matching note in /getLoggedIn above.
+    const childrenWithImages = childrenUnder18.map((child) => {
         let childAge = null;
         if (child.dob) {
           const birthDate = new Date(child.dob);
@@ -1525,10 +1488,9 @@ app.get("/getParentChildren", authenticateToken, async (req, res) => {
           family_role: child.family_role,
           dob: child.dob,
           age: childAge,
-          profile_pic: profileImageUrl,
+          profile_pic: `https://api.suscopts.org/image/${child.portal_id}`,
         };
-      }),
-    );
+      });
 
     res.json({
       success: true,
