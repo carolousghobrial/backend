@@ -5470,6 +5470,7 @@ app.get(
           last_name: profile.last_name || "",
           email: profile.email || "",
           has_email: !!profile.email,
+          current_course_id: e.course_id || null,
           current_class_name: e.ds_courses?.class_name || "",
           current_enrolled_date: e.enrolled_date || null,
           weighted_percentage: grade?.weighted_percentage ?? null,
