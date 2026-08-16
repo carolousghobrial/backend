@@ -767,7 +767,7 @@ app.post("/login/magic/complete", async (req, res) => {
       });
     }
 
-    const { data: profile, error: profileError } = await supabase.supabase
+    let { data: profile, error: profileError } = await supabase.supabase
       .from("profiles")
       .select("*")
       .eq("id", user.id)
@@ -775,6 +775,53 @@ app.post("/login/magic/complete", async (req, res) => {
 
     if (profileError) {
       console.error("Profile fetch error (magic link):", profileError);
+
+      // The auth login itself succeeded, but nothing in profiles carries this
+      // id yet -- same gap /login/ds/claim-profile exists to close, just not
+      // limited to the DS registration path. Look for a login-less directory
+      // row sharing this email and adopt it with the same safe pattern
+      // (release portal_id from the old row, then update-or-insert the row
+      // keyed by the auth id -- never delete rows or reassign a primary key).
+      const { data: dirRows } = await supabase.supabase
+        .from("profiles")
+        .select("*")
+        .eq("email", user.email)
+        .neq("id", user.id);
+      const directoryProfile = (dirRows || [])[0] || null;
+
+      if (directoryProfile) {
+        const identity = {
+          portal_id: directoryProfile.portal_id,
+          first_name: directoryProfile.first_name,
+          last_name: directoryProfile.last_name,
+          dob: directoryProfile.dob,
+          cellphone: directoryProfile.cellphone,
+          shirt_size: directoryProfile.shirt_size,
+          family_id: directoryProfile.family_id,
+          family_role: directoryProfile.family_role,
+          grade_level: directoryProfile.grade_level,
+          gender: directoryProfile.gender,
+          email: user.email,
+        };
+
+        await supabase.supabase
+          .from("profiles")
+          .update({ portal_id: null })
+          .eq("id", directoryProfile.id);
+
+        const { data: reconciled, error: reconcileError } = await supabase.supabase
+          .from("profiles")
+          .upsert({ id: user.id, ...identity })
+          .select()
+          .single();
+
+        if (reconcileError) {
+          console.error("Magic-link auto-claim failed:", reconcileError);
+        } else {
+          profile = reconciled;
+          console.log("Magic-link auto-claim linked", user.email, "to portal_id", identity.portal_id);
+        }
+      }
     }
 
     console.log("Magic link sign-in successful for:", user.email);
