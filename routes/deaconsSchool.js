@@ -6408,6 +6408,114 @@ app.post("/registration/send-link", async (req, res) => {
   }
 });
 
+// POST email a registration magic link to EVERY portal_id given, grouped by
+// email so a family with several unregistered kids gets exactly ONE email
+// (priest only → auto-guarded, same as /registration/send-link).
+// Body: { portal_ids: string[] }
+app.post("/registration/send-links-bulk", async (req, res) => {
+  try {
+    const { portal_ids } = req.body || {};
+    if (!Array.isArray(portal_ids) || portal_ids.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: "portal_ids (array) is required" });
+    }
+    const ids = [...new Set(portal_ids.map(String))];
+
+    const { data: profiles, error: profErr } = await supabase.supabase
+      .from("profiles")
+      .select("id, portal_id, first_name, last_name, dob, cellphone, family_id, family_role, email")
+      .in("portal_id", ids);
+    if (profErr) {
+      return res.status(500).json({ success: false, error: profErr.message });
+    }
+
+    // Group by resolved email -- this is what makes a family with N
+    // unregistered kids receive ONE email instead of N.
+    const groups = new Map(); // email -> profile[]
+    const noEmail = [];
+    for (const id of ids) {
+      const profile = (profiles || []).find((p) => p.portal_id === id);
+      if (!profile) continue;
+      const email = (profile.email || "").toLowerCase().trim();
+      if (!email) {
+        noEmail.push({ portal_id: id, first_name: profile.first_name, last_name: profile.last_name });
+        continue;
+      }
+      if (!groups.has(email)) groups.set(email, []);
+      groups.get(email).push(profile);
+    }
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://www.stgeorgecocnashville.org";
+    const emailRedirectTo = `${frontendUrl}/deaconsSchoolRegister?claim=1`;
+
+    const results = [];
+    for (const [email, members] of groups) {
+      try {
+        const hasLogin = await dsEmailHasLogin(email);
+        const first = members[0];
+
+        const otpOptions = hasLogin
+          ? { shouldCreateUser: false, emailRedirectTo }
+          : {
+              shouldCreateUser: true,
+              emailRedirectTo,
+              data: {
+                portal_id: first.portal_id,
+                first_name: first.first_name,
+                last_name: first.last_name,
+                dob: first.dob,
+                cellphone: first.cellphone,
+                family_id: first.family_id,
+                family_role: first.family_role,
+                ds_claim_portal_id: first.portal_id,
+              },
+            };
+
+        const { error: otpError } = await supabase.supabase.auth.signInWithOtp({
+          email,
+          options: otpOptions,
+        });
+
+        results.push({
+          email: dsMaskEmail(email),
+          names: members.map((m) => `${m.first_name} ${m.last_name}`),
+          portal_ids: members.map((m) => m.portal_id),
+          success: !otpError,
+          error: otpError ? "Could not send the sign-in link." : undefined,
+        });
+      } catch (innerErr) {
+        console.error("send-links-bulk per-email error:", innerErr);
+        results.push({
+          email: dsMaskEmail(email),
+          names: members.map((m) => `${m.first_name} ${m.last_name}`),
+          portal_ids: members.map((m) => m.portal_id),
+          success: false,
+          error: "Internal error sending this link.",
+        });
+      }
+      // Small stagger so a large batch doesn't burst past the email
+      // provider's rate limit.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+
+    const sent = results.filter((r) => r.success).length;
+    res.json({
+      success: true,
+      message: `Sent ${sent} of ${results.length} email(s)` +
+        (noEmail.length ? `; ${noEmail.length} member(s) have no email on file` : ""),
+      sent,
+      failed: results.length - sent,
+      results,
+      noEmail,
+    });
+  } catch (err) {
+    console.error("send-links-bulk error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 // POST enroll a member directly for next year, paid by cash or fee-waived
 // (priest only → auto-guarded). Always enrolls into the course the student
 // QUALIFIED for (promotion rules); an explicit course_id may override only when
