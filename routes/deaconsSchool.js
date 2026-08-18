@@ -2750,38 +2750,54 @@ app.get("/getAllDSTeachers", authenticateToken, async (req, res) => {
     }
     const classNameById = new Map((courses || []).map((c) => [c.course_id, c.class_name]));
 
+    // Two plain queries instead of an embedded profiles:teacher_id(...)
+    // select -- that embed requires PostgREST to have a registered FK
+    // relationship between ds_course_teachers.teacher_id and profiles,
+    // which doesn't exist even though the relationship is logically true
+    // (same gotcha documented in getPreviousYearDSTeachers above).
     const { data: assignments, error: assignError } = await supabase.supabase
       .from("ds_course_teachers")
-      .select(
-        `course_id,
-        role,
-        profiles:teacher_id (
-          portal_id,
-          first_name,
-          last_name,
-          email
-        )`,
-      )
+      .select("teacher_id, course_id, role")
       .in("course_id", courseIds)
       .eq("is_active", true);
     if (assignError) {
+      console.error("getAllDSTeachers: assignments lookup failed:", assignError);
       return res.status(500).json({ success: false, error: assignError.message });
     }
 
+    const teacherIds = [...new Set((assignments || []).map((a) => a.teacher_id).filter(Boolean))];
+    if (teacherIds.length === 0) {
+      return res.json({ success: true, data: [], academic_year: targetYear });
+    }
+
+    const { data: teacherProfiles, error: profilesError } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id, first_name, last_name, email")
+      .in("portal_id", teacherIds);
+    if (profilesError) {
+      console.error("getAllDSTeachers: profiles lookup failed:", profilesError);
+      return res.status(500).json({ success: false, error: profilesError.message });
+    }
+    const profileMap = new Map((teacherProfiles || []).map((p) => [p.portal_id, p]));
+
     const teachers = (assignments || [])
-      .filter((a) => a.profiles)
-      .map((a) => ({
-        id: a.profiles.portal_id,
-        profile_id: a.profiles.portal_id,
-        first_name: a.profiles.first_name || "",
-        last_name: a.profiles.last_name || "",
-        email: a.profiles.email,
-        profile_pic: `https://api.suscopts.org/image/${a.profiles.portal_id}`,
-        is_active: true,
-        role: a.role,
-        course_id: a.course_id,
-        class_name: classNameById.get(a.course_id) || "",
-      }))
+      .map((a) => {
+        const profile = profileMap.get(a.teacher_id);
+        if (!profile) return null;
+        return {
+          id: profile.portal_id,
+          profile_id: profile.portal_id,
+          first_name: profile.first_name || "",
+          last_name: profile.last_name || "",
+          email: profile.email,
+          profile_pic: `https://api.suscopts.org/image/${profile.portal_id}`,
+          is_active: true,
+          role: a.role,
+          course_id: a.course_id,
+          class_name: classNameById.get(a.course_id) || "",
+        };
+      })
+      .filter(Boolean)
       .sort((a, b) => (a.first_name || "").localeCompare(b.first_name || ""));
 
     res.json({ success: true, data: teachers, academic_year: targetYear });
