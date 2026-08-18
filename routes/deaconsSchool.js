@@ -13,7 +13,27 @@ const {
   requireDeaconsSchoolStaff,
   requireTeacherAssignedToCourse,
   requireTeacherAssignedToCourseForBatch,
+  resolvePortalId,
+  fetchUserRoleIds,
+  PRIVILEGED_DS_ROLES,
 } = require("../middleware/auth");
+
+// is_current on ds_academic_years is NOT "the year that's open right now" --
+// its meaning flips at year-end rollover to mean the just-completed year.
+// The open (not-yet-closed) year is the correct "current" year everywhere in
+// this app (course pickers, register-members, calendar, courseComparison,
+// getMyCoursesTaught, getStudentCourses) -- this was previously copy-pasted
+// in each of those places; resolve it here once instead.
+async function resolveOpenAcademicYear() {
+  const { data: years, error } = await supabase.supabase
+    .from("ds_academic_years")
+    .select("year_label, is_closed");
+  if (error) return { year: null, error };
+  const open = (years || [])
+    .filter((y) => !y.is_closed)
+    .sort((a, b) => b.year_label.localeCompare(a.year_label))[0];
+  return { year: open?.year_label || null, error: null };
+}
 const {
   classifyCourse,
   decideNextBracket,
@@ -855,6 +875,9 @@ app.get("/getHymns", async (req, res) => {
 
   res.send(deacons_school_hymns);
 });
+// Public, unauthenticated: every course, optionally scoped to one academic
+// year. For pages that must work with no login -- the public calendar, the
+// public self-service registration page, "levels" info, etc.
 app.get("/getCourses", async (req, res) => {
   const { academic_year } = req.query;
   let query = supabase.supabase.from("ds_courses").select("*");
@@ -864,6 +887,92 @@ app.get("/getCourses", async (req, res) => {
   let { data: deacons_school_hymns, error } = await query;
 
   res.send(deacons_school_hymns);
+});
+
+// Authenticated: the course list a logged-in admin-dashboard course picker
+// should show. Priest / school admin (coordinator, deacon_school_coordinator,
+// deacon_school_principal) see every course, same as /getCourses. Everyone
+// else (teacher, student, or anyone with no DS role) sees only the courses
+// they teach or are enrolled in -- so a teacher opening e.g. Course Roster
+// or Take Attendance can't accidentally pick someone else's class.
+app.get("/courses/mine", authenticateToken, async (req, res) => {
+  try {
+    const portalId = await resolvePortalId(req);
+    if (!portalId) {
+      return res.status(403).json({ success: false, error: "User profile is missing a portal ID" });
+    }
+
+    const { error: roleError, roleIds } = await fetchUserRoleIds(portalId);
+    if (roleError) {
+      return res.status(500).json({ success: false, error: "Failed to verify user roles" });
+    }
+    const isPrivileged = roleIds.some((r) => PRIVILEGED_DS_ROLES.has(r));
+
+    const { academic_year } = req.query;
+
+    if (isPrivileged) {
+      let query = supabase.supabase.from("ds_courses").select("*");
+      if (academic_year) query = query.eq("academic_year", academic_year);
+      const { data, error } = await query;
+      if (error) return res.status(500).json({ success: false, error: error.message });
+      return res.json({ success: true, scope: "all", data: data || [] });
+    }
+
+    let targetYear = academic_year;
+    if (!targetYear) {
+      const { year } = await resolveOpenAcademicYear();
+      targetYear = year;
+    }
+
+    const [{ data: taught, error: taughtErr }, { data: enrolled, error: enrolledErr }] =
+      await Promise.all([
+        supabase.supabase.rpc("get_ds_teacher_courses_by_portal_id", { p_user_id: portalId }),
+        supabase.supabase.rpc("get_ds_student_courses_by_portal_id", { p_user_id: portalId }),
+      ]);
+    if (taughtErr) return res.status(500).json({ success: false, error: taughtErr.message });
+    if (enrolledErr) return res.status(500).json({ success: false, error: enrolledErr.message });
+
+    const rows = [
+      ...(taught || []).map((c) => ({ ...c, viewer_role: "teacher" })),
+      ...(enrolled || []).map((c) => ({ ...c, viewer_role: "student" })),
+    ];
+    const courseIds = [...new Set(rows.map((c) => c.course_id).filter(Boolean))];
+    if (courseIds.length === 0) {
+      return res.json({ success: true, scope: "mine", data: [] });
+    }
+
+    const { data: courseRows, error: courseError } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id, class_name, level, academic_year")
+      .in("course_id", courseIds);
+    if (courseError) return res.status(500).json({ success: false, error: courseError.message });
+
+    const byId = new Map((courseRows || []).map((c) => [c.course_id, c]));
+    const decorated = rows.map((r) => ({
+      ...r,
+      class_name: r.class_name || byId.get(r.course_id)?.class_name || "",
+      level: r.level || byId.get(r.course_id)?.level || "",
+      academic_year: byId.get(r.course_id)?.academic_year ?? null,
+    }));
+
+    const scoped = targetYear
+      ? decorated.filter((r) => r.academic_year === targetYear)
+      : decorated;
+
+    // A teacher of a course who is also enrolled elsewhere shows up once per
+    // role -- dedupe by course_id, first occurrence wins (teacher rows first).
+    const seen = new Set();
+    const deduped = scoped.filter((r) => {
+      if (seen.has(r.course_id)) return false;
+      seen.add(r.course_id);
+      return true;
+    });
+
+    res.json({ success: true, scope: "mine", data: deduped });
+  } catch (err) {
+    console.error("courses/mine error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
 });
 
 /**
@@ -878,16 +987,11 @@ app.get("/courseComparison", async (req, res) => {
   try {
     let targetYear = req.query.academic_year;
     if (!targetYear) {
-      const { data: years, error: yearsError } = await supabase.supabase
-        .from("ds_academic_years")
-        .select("year_label, is_closed");
+      const { year, error: yearsError } = await resolveOpenAcademicYear();
       if (yearsError) {
         return res.status(500).json({ success: false, error: yearsError.message });
       }
-      const open = (years || [])
-        .filter((y) => !y.is_closed)
-        .sort((a, b) => b.year_label.localeCompare(a.year_label))[0];
-      targetYear = open?.year_label;
+      targetYear = year;
     }
     if (!targetYear) {
       return res.json({ success: true, data: [], combined: null, academic_year: null });
@@ -1258,18 +1362,8 @@ app.get("/getMyCoursesTaught/:id", async (req, res) => {
 
   let targetYear = req.query.academic_year;
   if (!targetYear) {
-    // is_current is NOT "the year that's open right now" -- its meaning
-    // flips at year-end rollover to mean the just-completed year (see the
-    // same reasoning documented in register-members / registration-requests
-    // / calendar). Use the open (not-yet-closed) year instead, same rule
-    // used everywhere else in the app.
-    const { data: years } = await supabase.supabase
-      .from("ds_academic_years")
-      .select("year_label, is_closed");
-    const open = (years || [])
-      .filter((y) => !y.is_closed)
-      .sort((a, b) => b.year_label.localeCompare(a.year_label))[0];
-    targetYear = open?.year_label;
+    const { year } = await resolveOpenAcademicYear();
+    targetYear = year;
   }
 
   if (!targetYear) {
@@ -1408,15 +1502,8 @@ app.get("/getStudentCourses/:id", async (req, res) => {
 
   let targetYear = req.query.academic_year;
   if (!targetYear) {
-    // is_current is NOT "the year that's open right now" -- its meaning
-    // flips at year-end rollover. Use the open (not-yet-closed) year, same
-    // rule as getMyCoursesTaught / register-members / calendar.
-    const { data: years } = await supabase.supabase
-      .from("ds_academic_years")
-      .select("year_label, is_closed");
-    targetYear = (years || [])
-      .filter((y) => !y.is_closed)
-      .sort((a, b) => b.year_label.localeCompare(a.year_label))[0]?.year_label;
+    const { year } = await resolveOpenAcademicYear();
+    targetYear = year;
   }
 
   // No open year configured -- fall back to unscoped rather than silently
@@ -2631,6 +2718,80 @@ app.get("/getTeachersByCourse/:courseId", async (req, res) => {
 });
 
 /**
+ * All teachers/coordinators actively assigned to any course in a given
+ * (default: open) academic year, unfiltered by class. Powers the Teacher
+ * Attendance page's "no class picked" view -- browse/mark everyone at once
+ * instead of being forced to filter to one class first. One row per
+ * (teacher, course) pair, since a teacher may teach more than one class.
+ * GET /getAllDSTeachers?academic_year=YYYY-YYYY
+ */
+app.get("/getAllDSTeachers", authenticateToken, async (req, res) => {
+  try {
+    let targetYear = req.query.academic_year;
+    if (!targetYear) {
+      const { year } = await resolveOpenAcademicYear();
+      targetYear = year;
+    }
+    if (!targetYear) {
+      return res.json({ success: true, data: [], academic_year: null });
+    }
+
+    const { data: courses, error: coursesError } = await supabase.supabase
+      .from("ds_courses")
+      .select("course_id, class_name")
+      .eq("academic_year", targetYear)
+      .eq("is_active", true);
+    if (coursesError) {
+      return res.status(500).json({ success: false, error: coursesError.message });
+    }
+    const courseIds = (courses || []).map((c) => c.course_id);
+    if (courseIds.length === 0) {
+      return res.json({ success: true, data: [], academic_year: targetYear });
+    }
+    const classNameById = new Map((courses || []).map((c) => [c.course_id, c.class_name]));
+
+    const { data: assignments, error: assignError } = await supabase.supabase
+      .from("ds_course_teachers")
+      .select(
+        `course_id,
+        role,
+        profiles:teacher_id (
+          portal_id,
+          first_name,
+          last_name,
+          email
+        )`,
+      )
+      .in("course_id", courseIds)
+      .eq("is_active", true);
+    if (assignError) {
+      return res.status(500).json({ success: false, error: assignError.message });
+    }
+
+    const teachers = (assignments || [])
+      .filter((a) => a.profiles)
+      .map((a) => ({
+        id: a.profiles.portal_id,
+        profile_id: a.profiles.portal_id,
+        first_name: a.profiles.first_name || "",
+        last_name: a.profiles.last_name || "",
+        email: a.profiles.email,
+        profile_pic: `https://api.suscopts.org/image/${a.profiles.portal_id}`,
+        is_active: true,
+        role: a.role,
+        course_id: a.course_id,
+        class_name: classNameById.get(a.course_id) || "",
+      }))
+      .sort((a, b) => (a.first_name || "").localeCompare(b.first_name || ""));
+
+    res.json({ success: true, data: teachers, academic_year: targetYear });
+  } catch (err) {
+    console.error("getAllDSTeachers error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+/**
  * Get class session for specific course and date
  * GET /getClassSession/:courseId/:date
  */
@@ -3344,6 +3505,133 @@ app.put(
       });
     } catch (error) {
       console.error("Update attendance error:", error);
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  },
+);
+
+/**
+ * Save teacher attendance across MULTIPLE classes at once -- the "no class
+ * picked" view on Teacher Attendance shows every teacher/coordinator for the
+ * year, and each teacher's record needs to land against their own assigned
+ * course, not one shared session. Groups records by course_id, finds-or-
+ * creates that course's session for the date (idempotent -- re-submitting
+ * never hits a duplicate-session-key error), then replaces that session's
+ * attendance rows the same way the single-course update endpoint does.
+ * Restricted to DS staff (not the per-course requireTeacherAssignedToCourse
+ * check, since a caller here may be writing across many courses at once).
+ * POST /createTeacherAttendanceForAll
+ */
+app.post(
+  "/createTeacherAttendanceForAll",
+  requireDeaconsSchoolStaff,
+  async (req, res) => {
+    try {
+      const { session_date, topic, notes, recorded_by, attendance_records } = req.body || {};
+
+      if (!session_date || !Array.isArray(attendance_records)) {
+        return res.status(400).json({
+          success: false,
+          error: "session_date and attendance_records are required",
+        });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(session_date)) {
+        return res.status(400).json({ success: false, error: "Invalid date format. Use YYYY-MM-DD" });
+      }
+      if (attendance_records.length === 0) {
+        return res.status(400).json({ success: false, error: "At least one attendance record is required" });
+      }
+      for (const record of attendance_records) {
+        if (!record.teacher_id || !record.course_id || record.present === undefined) {
+          return res.status(400).json({
+            success: false,
+            error: "Each attendance record must have teacher_id, course_id, and present status",
+          });
+        }
+      }
+
+      const byCourse = new Map();
+      for (const record of attendance_records) {
+        if (!byCourse.has(record.course_id)) byCourse.set(record.course_id, []);
+        byCourse.get(record.course_id).push(record);
+      }
+
+      const sessions = [];
+      let totalRecords = 0;
+
+      for (const [course_id, records] of byCourse) {
+        // Find-or-create this course's session for the date -- avoids the
+        // duplicate-key error a blind insert would hit on a re-submit.
+        const { data: existing, error: findError } = await supabase.supabase
+          .from("ds_class_sessions")
+          .select("session_id")
+          .eq("course_id", course_id)
+          .eq("session_date", session_date)
+          .maybeSingle();
+        if (findError) {
+          return res.status(500).json({ success: false, error: findError.message });
+        }
+
+        let sessionId = existing?.session_id;
+        if (sessionId) {
+          const { error: updateSessionError } = await supabase.supabase
+            .from("ds_class_sessions")
+            .update({ topic: topic || null, notes: notes || null, updated_at: new Date().toISOString() })
+            .eq("session_id", sessionId);
+          if (updateSessionError) {
+            return res.status(500).json({ success: false, error: updateSessionError.message });
+          }
+        } else {
+          const { data: created, error: createSessionError } = await supabase.supabase
+            .from("ds_class_sessions")
+            .insert([{
+              course_id,
+              session_date,
+              topic: topic || null,
+              notes: notes || null,
+              recorded_by,
+              created_at: new Date().toISOString(),
+            }])
+            .select()
+            .single();
+          if (createSessionError) {
+            return res.status(500).json({ success: false, error: createSessionError.message });
+          }
+          sessionId = created.session_id;
+        }
+
+        await supabase.supabase.from("ds_teacher_attendance").delete().eq("session_id", sessionId);
+
+        const validatedRecords = records.map((record) => ({
+          course_id,
+          teacher_id: record.teacher_id,
+          session_id: sessionId,
+          present: record.present,
+          good_behavior: record.good_behavior,
+          notes: record.notes || null,
+          recorded_by,
+          recorded_at: new Date().toISOString(),
+        }));
+
+        const { data: attendanceData, error: attendanceError } = await supabase.supabase
+          .from("ds_teacher_attendance")
+          .insert(validatedRecords)
+          .select();
+        if (attendanceError) {
+          return res.status(500).json({ success: false, error: attendanceError.message });
+        }
+
+        sessions.push({ course_id, session_id: sessionId, records: attendanceData?.length || 0 });
+        totalRecords += attendanceData?.length || 0;
+      }
+
+      res.json({
+        success: true,
+        message: `Attendance saved for ${sessions.length} class(es), ${totalRecords} record(s)`,
+        data: { sessions, total_records: totalRecords },
+      });
+    } catch (err) {
+      console.error("createTeacherAttendanceForAll error:", err);
       res.status(500).json({ success: false, error: "Internal server error" });
     }
   },

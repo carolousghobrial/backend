@@ -418,4 +418,7 @@ module.exports = {
   requirePortalMatchOrPrivileged,
   requireTeacherAssignedToCourse,
   requireTeacherAssignedToCourseForBatch,
+  resolvePortalId,
+  fetchUserRoleIds,
+  PRIVILEGED_DS_ROLES,
 };
