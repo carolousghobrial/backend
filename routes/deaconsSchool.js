@@ -246,11 +246,15 @@ const AUTH_EXEMPT_ROUTES = new Set([
   // exempt from the staff-only requireDeaconsSchoolWrite guard.
   "/createReenrollmentPaymentIntent",
   "/selfEnroll",
+  "/createReenrollmentPaymentIntentBatch",
+  "/selfEnrollBatch",
   // New-registration flow is for logged-OUT first-time visitors: they pay the
   // $25 fee and submit their info for a coordinator to connect + enroll. Both
   // routes are public (no login) and verify the Stripe payment server-side.
   "/createRegistrationPaymentIntent",
   "/registrationRequest",
+  "/createRegistrationPaymentIntentBatch",
+  "/registrationRequestBatch",
 ]);
 
 app.use((req, res, next) => {
@@ -4281,6 +4285,52 @@ app.post("/createReenrollmentPaymentIntent", authenticateToken, async (req, res)
   }
 });
 
+// ── Same as above, but for multiple family members registered in one link:
+// one PaymentIntent for $25 x N, verified server-side against the exact set
+// of student_ids in /selfEnrollBatch below.
+app.post("/createReenrollmentPaymentIntentBatch", authenticateToken, async (req, res) => {
+  try {
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe is not configured on the server",
+      });
+    }
+
+    const { student_ids } = req.body || {};
+    if (!Array.isArray(student_ids) || student_ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "student_ids (array) is required",
+      });
+    }
+    const ids = [...new Set(student_ids.map((id) => String(id)))];
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: REENROLLMENT_FEE_CENTS * ids.length,
+      currency: "usd",
+      description: `Deacons School Re-enrollment Fee x${ids.length}`,
+      metadata: {
+        purpose: "ds_reenrollment_batch",
+        student_ids: JSON.stringify(ids),
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+      amount: paymentIntent.amount,
+    });
+  } catch (err) {
+    console.error("Error creating batch re-enrollment payment intent:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to initiate payment",
+    });
+  }
+});
+
 // ── Create a Stripe PaymentIntent for the $25 NEW-registration fee ─────────────
 // Public (logged-out first-time visitors). The purpose tag lets /registrationRequest
 // verify this payment belongs to the new-registration flow before recording it.
@@ -4513,6 +4563,227 @@ app.post("/selfEnroll", authenticateToken, async (req, res) => {
   }
 });
 
+// ── Self-enrollment for multiple family members against ONE payment ────────────
+// Body: { enrollments: [{student_id, course_id}, ...], payment_intent_id }.
+// Verifies a single PaymentIntent covering $25 x N against the exact set of
+// student_ids requested, then enrolls each one the same way /selfEnroll does.
+// Per-person failures (already enrolled, course not found, etc.) don't abort
+// the whole batch -- every entry gets its own result so the frontend can show
+// exactly who succeeded and who needs attention.
+app.post("/selfEnrollBatch", authenticateToken, async (req, res) => {
+  try {
+    const { enrollments, payment_intent_id } = req.body || {};
+
+    if (!Array.isArray(enrollments) || enrollments.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "enrollments (array) is required",
+      });
+    }
+    for (const e of enrollments) {
+      if (!e?.student_id || !e?.course_id) {
+        return res.status(400).json({
+          success: false,
+          error: "Each enrollment needs a student_id and course_id",
+        });
+      }
+    }
+
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe is not configured on the server",
+      });
+    }
+    if (!payment_intent_id) {
+      return res.status(402).json({
+        success: false,
+        error: "Payment is required to complete re-enrollment",
+      });
+    }
+
+    let paymentIntent;
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
+    } catch (e) {
+      return res.status(402).json({
+        success: false,
+        error: "Could not verify payment. Please try again.",
+      });
+    }
+
+    const requestedIds = [...new Set(enrollments.map((e) => String(e.student_id)))];
+    let metadataIds = [];
+    try {
+      metadataIds = JSON.parse(paymentIntent?.metadata?.student_ids || "[]");
+    } catch {
+      metadataIds = [];
+    }
+    const metadataIdSet = new Set(metadataIds.map(String));
+    const sameSet =
+      requestedIds.length === metadataIdSet.size &&
+      requestedIds.every((id) => metadataIdSet.has(id));
+
+    if (
+      !paymentIntent ||
+      paymentIntent.status !== "succeeded" ||
+      paymentIntent.amount !== REENROLLMENT_FEE_CENTS * requestedIds.length ||
+      paymentIntent.currency !== "usd" ||
+      paymentIntent.metadata?.purpose !== "ds_reenrollment_batch" ||
+      !sameSet
+    ) {
+      return res.status(402).json({
+        success: false,
+        error:
+          "Payment not completed or invalid. Please complete the fee before enrolling.",
+      });
+    }
+
+    // Security: verify every student_id belongs to the authenticated user or
+    // one of their family members -- one lookup for the whole batch.
+    const { data: authProfiles, error: profileError } = await supabase.supabase
+      .from("profiles")
+      .select("portal_id")
+      .eq("id", req.user.id);
+    if (profileError || !authProfiles?.length) {
+      return res.status(403).json({ success: false, error: "User profile not found" });
+    }
+    const authPortalIds = authProfiles.map((p) => p.portal_id);
+
+    const { data: familyMembers, error: familyError } = await supabase.supabase.rpc(
+      "get_family_children",
+      { portal_id_in: authPortalIds },
+    );
+    if (familyError) {
+      return res.status(500).json({ success: false, error: "Could not verify family membership" });
+    }
+    const allowedPortalIds = new Set((familyMembers || []).map((m) => String(m.portal_id)));
+    const unauthorized = requestedIds.filter((id) => !allowedPortalIds.has(id));
+    if (unauthorized.length > 0) {
+      return res.status(403).json({
+        success: false,
+        error: "You can only enroll yourself or a family member",
+      });
+    }
+
+    const cardPayment = {
+      payment_method: "card",
+      payment_reference: payment_intent_id,
+      payment_amount_cents: REENROLLMENT_FEE_CENTS,
+      paid_at: new Date().toISOString(),
+    };
+
+    const results = [];
+    for (const { student_id, course_id } of enrollments) {
+      try {
+        const { data: course, error: courseError } = await supabase.supabase
+          .from("ds_courses")
+          .select("academic_year")
+          .eq("course_id", course_id)
+          .single();
+        if (courseError || !course) {
+          results.push({ student_id, success: false, error: "Course not found" });
+          continue;
+        }
+
+        let academic_year = course.academic_year;
+        if (!academic_year) {
+          const { data: currentYear } = await supabase.supabase
+            .from("ds_academic_years")
+            .select("year_label")
+            .eq("is_current", true)
+            .single();
+          academic_year = currentYear?.year_label;
+        }
+        if (!academic_year) {
+          results.push({ student_id, success: false, error: "No active academic year found" });
+          continue;
+        }
+
+        const { data: existingActive } = await supabase.supabase
+          .from("ds_student_enrollment")
+          .select("enrollment_id, course_id")
+          .eq("student_id", student_id)
+          .eq("academic_year", academic_year)
+          .eq("is_active", true)
+          .maybeSingle();
+        if (existingActive) {
+          results.push({
+            student_id,
+            success: false,
+            error: "Already enrolled for this academic year",
+            existingEnrollment: existingActive,
+          });
+          continue;
+        }
+
+        const { data: existingInactive } = await supabase.supabase
+          .from("ds_student_enrollment")
+          .select("enrollment_id")
+          .eq("student_id", student_id)
+          .eq("course_id", course_id)
+          .eq("academic_year", academic_year)
+          .eq("is_active", false)
+          .maybeSingle();
+
+        if (existingInactive) {
+          const { data, error } = await supabase.supabase
+            .from("ds_student_enrollment")
+            .update({
+              is_active: true,
+              enrolled_date: new Date().toISOString().split("T")[0],
+              ...cardPayment,
+            })
+            .eq("enrollment_id", existingInactive.enrollment_id)
+            .select()
+            .single();
+          if (error) {
+            results.push({ student_id, success: false, error: error.message });
+          } else {
+            results.push({ student_id, success: true, data });
+          }
+          continue;
+        }
+
+        const { data, error } = await supabase.supabase
+          .from("ds_student_enrollment")
+          .insert([
+            {
+              student_id,
+              course_id,
+              academic_year,
+              enrolled_date: new Date().toISOString().split("T")[0],
+              is_active: true,
+              role: "deacon_school_student",
+              ...cardPayment,
+            },
+          ])
+          .select()
+          .single();
+        if (error) {
+          results.push({ student_id, success: false, error: error.message });
+        } else {
+          results.push({ student_id, success: true, data });
+        }
+      } catch (innerErr) {
+        console.error("selfEnrollBatch per-student error:", innerErr);
+        results.push({ student_id, success: false, error: "Internal server error" });
+      }
+    }
+
+    const anySuccess = results.some((r) => r.success);
+    return res.status(anySuccess ? 200 : 500).json({
+      success: anySuccess,
+      message: `Enrolled ${results.filter((r) => r.success).length} of ${results.length}`,
+      results,
+    });
+  } catch (err) {
+    console.error("selfEnrollBatch error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 // ─── DS REGISTRATION REQUESTS (manual "I'm new / connect my account") ─────────
 // Public submission when the DOB+last-name lookup finds no directory record.
 // A coordinator later links the request to a portal profile or rejects it.
@@ -4630,6 +4901,163 @@ app.post("/registrationRequest", async (req, res) => {
     });
   } catch (err) {
     console.error("registrationRequest error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// ── Same as /createRegistrationPaymentIntent, but for multiple first-time
+// people (e.g. several siblings) registered together in one link.
+app.post("/createRegistrationPaymentIntentBatch", async (req, res) => {
+  try {
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe is not configured on the server",
+      });
+    }
+
+    const count = Number(req.body?.count);
+    if (!Number.isInteger(count) || count < 1) {
+      return res.status(400).json({
+        success: false,
+        error: "count (positive integer) is required",
+      });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: REENROLLMENT_FEE_CENTS * count,
+      currency: "usd",
+      description: `Deacons School New Registration Fee x${count}`,
+      metadata: { purpose: "ds_new_registration_batch", count: String(count) },
+    });
+
+    return res.status(200).json({
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+      amount: paymentIntent.amount,
+    });
+  } catch (err) {
+    console.error("Error creating batch new-registration payment intent:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to initiate payment",
+    });
+  }
+});
+
+// Public: submit multiple new-registration requests against ONE payment.
+// Body: { people: [{first_name, last_name, dob, previous_level, notes}, ...],
+//          email, cellphone, payment_intent_id }. Contact info is shared
+// across the family since one parent is submitting for everyone.
+app.post("/registrationRequestBatch", async (req, res) => {
+  try {
+    const { people, email, cellphone, payment_intent_id } = req.body || {};
+
+    if (!Array.isArray(people) || people.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "people (array) is required",
+      });
+    }
+    if (!email?.trim() && !cellphone?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Please provide an email or a phone number so we can reach you",
+      });
+    }
+    for (const person of people) {
+      if (!person?.first_name?.trim() || !person?.last_name?.trim() || !person?.dob) {
+        return res.status(400).json({
+          success: false,
+          error: "Each person needs a first name, last name, and date of birth",
+        });
+      }
+    }
+
+    const stripe = getStripeClient();
+    if (!stripe) {
+      return res.status(503).json({
+        success: false,
+        error: "Stripe is not configured on the server",
+      });
+    }
+    if (!payment_intent_id) {
+      return res.status(402).json({
+        success: false,
+        error: "Payment is required to complete registration",
+      });
+    }
+    let paymentIntent;
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
+    } catch (e) {
+      return res.status(402).json({
+        success: false,
+        error: "Could not verify payment. Please try again.",
+      });
+    }
+    if (
+      !paymentIntent ||
+      paymentIntent.status !== "succeeded" ||
+      paymentIntent.amount !== REENROLLMENT_FEE_CENTS * people.length ||
+      paymentIntent.currency !== "usd" ||
+      paymentIntent.metadata?.purpose !== "ds_new_registration_batch" ||
+      Number(paymentIntent.metadata?.count) !== people.length
+    ) {
+      return res.status(402).json({
+        success: false,
+        error:
+          "Payment not completed or invalid. Please complete the fee before submitting.",
+      });
+    }
+
+    // Guard against a double-submit reusing the same payment.
+    const { data: existing } = await supabase.supabase
+      .from("ds_registration_requests")
+      .select("id, first_name, last_name")
+      .eq("payment_reference", paymentIntent.id);
+    if (existing && existing.length > 0) {
+      return res.json({
+        success: true,
+        message:
+          "Thanks! We already received your information and will connect your accounts shortly.",
+        data: existing,
+      });
+    }
+
+    const rows = people.map((person) => ({
+      first_name: person.first_name.trim(),
+      last_name: person.last_name.trim(),
+      dob: person.dob,
+      cellphone: cellphone?.trim() || null,
+      email: email?.trim()?.toLowerCase() || null,
+      previous_level: person.previous_level?.trim() || null,
+      notes: person.notes?.trim() || null,
+      status: "pending",
+      payment_reference: paymentIntent.id,
+      payment_amount_cents: REENROLLMENT_FEE_CENTS,
+      paid_at: new Date().toISOString(),
+    }));
+
+    const { data, error } = await supabase.supabase
+      .from("ds_registration_requests")
+      .insert(rows)
+      .select();
+
+    if (error) {
+      console.error("registrationRequestBatch insert error:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    return res.json({
+      success: true,
+      message:
+        "Thanks! We received your information and will connect your accounts shortly.",
+      data,
+    });
+  } catch (err) {
+    console.error("registrationRequestBatch error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
